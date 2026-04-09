@@ -1,0 +1,12 @@
+node_modules/
+frontend/.next/
+backend/public/temp/
+backend/temp_media/
+.vscode/
+.env
+**/.env
+backend/.wwebjs_auth/
+backend/.wwebjs_cache/
+*.log
+**/__pycache__/
+*.pyc

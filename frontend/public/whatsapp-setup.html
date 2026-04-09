@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CommuniHub Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Times New Roman', serif; background-color:linear-gradient(180deg, #bbe7cd 0%, #5d72ba 100%) }
+        .sidebar-gradient { background: linear-gradient(180deg, #89c4a2 0%, #3b4e8e 100%); }
+        .card { background: white; border-radius: 12px; border: 1px solid #E5E7EB; }
+        .active-tab { border-bottom: 2px solid #B65331; color: #B65331; }
+    </style>
+</head>
+<body class="flex h-screen overflow-hidden text-gray-800">
+
+    <aside class="w-64 sidebar-gradient text-black flex flex-col p-6 space-y-8">
+        <div class="flex items-center space-x-2 text-xl font-bold">
+            <div class="w-8 h-8 bg-white/20 rounded-lg flex items-center justify-center">C</div>
+            <span>CommuniHub</span>
+        </div>
+        
+        <nav class="flex-1 space-y-1">
+            <a href="#" class="flex items-center space-x-3 bg-white/10 p-3 rounded-xl">
+                <span>Dashboard</span>
+            </a>
+            <a href="#" class="flex items-center justify-between p-3 opacity-80">
+                <span>Inbox</span>
+                <span class="bg-red-400 text-xs px-2 py-0.5 rounded-full">58</span>
+            </a>
+            <div class="pt-4 pb-2 text-xs uppercase opacity-50 tracking-wider">Channels</div>
+            <a href="#" class="flex items-center space-x-3 p-3 opacity-80"><span>WhatsApp</span></a>
+            <a href="#" class="flex items-center space-x-3 p-3 opacity-80"><span>Email</span></a>
+            <a href="#" class="flex items-center space-x-3 p-3 opacity-80"><span>SMS</span></a>
+            <a href="#" class="flex items-center space-x-3 p-3 opacity-80"><span>Slack</span></a>
+        </nav>
+
+    </aside>
+
+    <main class="flex-1 flex flex-col overflow-hidden">
+        
+        <header class="h-16 bg-#bbe7cd border-b flex items-center justify-between px-8">
+            <div class="flex items-center space-x-4">
+                <div class="text-right">
+                    <p class="text-sm font-semibold">Sarah J.</p>
+                    <p class="text-xs text-green-500 flex items-center justify-end">● Active</p>
+                </div>
+                <img src="https://i.pravatar.cc/40?img=32" class="w-10 h-10 rounded-full border border-orange-200">
+            </div>
+        </header>
+
+        <div class="p-8 overflow-y-auto space-y-6">
+            <div class="flex justify-between items-center">
+                <h1 class="text-2xl font-bold text-orange-900">Communication Overview</h1>
+                <button class="bg-orange-100 text-orange-800 px-4 py-2 rounded-full text-sm font-medium">● Channel status</button>
+            </div>
+
+            <div class="grid grid-cols-12 gap-6">
+                
+                <div class="col-span-4 space-y-6">
+                    <div class="grid grid-cols-2 gap-4">
+                        <div class="card p-4">
+                            <p class="text-xs text-gray-500">Total Conversations</p>
+                            <p class="text-2xl font-bold">1,432</p>
+                        </div>
+                        <div class="card p-4">
+                            <p class="text-xs text-gray-500">Pending Responses</p>
+                            <p class="text-2xl font-bold">47</p>
+                        </div>
+                        <div class="card p-4">
+                            <p class="text-xs text-gray-500">Channels Active <span class="bg-orange-800 text-white px-1 rounded-full text-[10px]">6</span></p>
+                            <p class="text-2xl font-bold">6</p>
+                        </div>
+                        <div class="card p-4">
+                            <p class="text-xs text-gray-500">Response Time</p>
+                            <p class="text-2xl font-bold">3min</p>
+                        </div>
+                    </div>
+
+                    <div class="card p-6 h-64 relative">
+                        <div class="flex justify-between items-center mb-4">
+                            <h3 class="font-bold">Message Volume</h3>
+                            <select class="text-xs border rounded p-1"><option>Line graph</option></select>
+                        </div>
+                        <div class="w-full h-32 bg-orange-50/50 rounded flex items-end justify-between px-2">
+                            <div class="w-2 bg-green-300 h-1/2 rounded-t"></div>
+                            <div class="w-2 bg-blue-400 h-3/4 rounded-t"></div>
+                            <div class="w-2 bg-blue-200 h-1/3 rounded-t"></div>
+                            <div class="w-2 bg-green-500 h-full rounded-t"></div>
+                        </div>
+                        <div class="flex justify-between mt-4 text-[10px] text-gray-400">
+                            <span>Mon</span><span>Tue</span><span>Wed</span><span>Thu</span><span>Sat</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-span-4 card flex flex-col">
+                    <div class="flex border-b">
+                        <button class="flex-1 py-3 text-sm font-medium active-tab">Unified Inbox</button>
+                        <button class="flex-1 py-3 text-sm font-medium text-gray-400">Active <span class="bg-green-400 text-white px-1 rounded text-[10px]">1</span></button>
+                    </div>
+                    <div class="p-4 flex-1 space-y-4">
+                        <div class="p-3 bg-orange-50 rounded-xl border border-green-200">
+                            <div class="flex justify-between items-start">
+                                <div class="flex space-x-3">
+                                    <img src="https://i.pravatar.cc/40?img=5" class="w-10 h-10 rounded-full">
+                                    <div>
+                                        <p class="text-sm font-bold">Alice Green <span class="font-normal text-xs opacity-60">(WhatsApp)</span></p>
+                                        <p class="text-xs text-gray-500 truncate w-32">Checking on order #552...</p>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-[10px] text-gray-400">10:15 AM</p>
+                                    <span class="bg-orange-200 text-orange-800 text-[10px] px-2 rounded">Gold</span>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="p-3">
+                            <div class="flex justify-between items-start">
+                                <div class="flex space-x-3">
+                                    <div class="w-10 h-10 bg-red-100 rounded-full flex items-center justify-center text-red-500">📧</div>
+                                    <div>
+                                        <p class="text-sm font-bold">David L. <span class="font-normal text-xs opacity-60">(Email)</span></p>
+                                        <p class="text-xs text-gray-500">New support request</p>
+                                    </div>
+                                </div>
+                                <div class="text-right">
+                                    <p class="text-[10px] text-gray-400">10:11 AM</p>
+                                    <span class="bg-red-400 text-white text-[10px] px-2 rounded">Email</span>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="col-span-4 card flex flex-col">
+                    <div class="p-4 border-b flex justify-between items-center">
+                        <div class="flex items-center space-x-3">
+                            <img src="https://i.pravatar.cc/40?img=5" class="w-10 h-10 rounded-full">
+                            <div>
+                                <p class="text-sm font-bold">Alice Green (WhatsApp)</p>
+                                <p class="text-[10px] text-green-500">Active profile</p>
+                            </div>
+                        </div>
+                        <span class="text-gray-400 cursor-pointer">•••</span>
+                    </div>
+                    <div class="flex-1 p-4 space-y-4 overflow-y-auto">
+                        <div class="flex items-end space-x-2">
+                            <img src="https://i.pravatar.cc/20?img=5" class="w-5 h-5 rounded-full mb-1">
+                            <div class="bg-gray-100 p-3 rounded-2xl rounded-bl-none text-sm max-w-[80%]">
+                                Checking on order at order #552.
+                            </div>
+                        </div>
+                        <div class="flex justify-end">
+                            <div class="bg-blue-200 p-3 rounded-2xl rounded-br-none text-sm w-3/4 h-8"></div>
+                        </div>
+                    </div>
+                    <div class="p-4 border-t">
+                        <input type="text" placeholder="Type a message..." class="w-full border-none text-sm mb-4 outline-none">
+                        <div class="flex justify-between items-center">
+                            <div class="flex space-x-4 opacity-60">
+                                <button class="text-sm flex items-center">📎 Attach</button>
+                                <button class="text-sm flex items-center">😊 Emoji</button>
+                            </div>
+                            <button class="bg-[#31b641] text-white px-6 py-2 rounded-xl text-sm font-medium">Send</button>
+                        </div>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+    </main>
+</body>
+</html>

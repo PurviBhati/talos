@@ -1,0 +1,31 @@
+{
+  "name": "unified-hub-backend",
+  "version": "1.0.0",
+  "description": "Routing API for Unified Messaging Hub",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "@azure/identity": "^4.13.0",
+    "@microsoft/microsoft-graph-client": "^3.0.7",
+    "@slack/web-api": "^7.14.1",
+    "@supabase/supabase-js": "^2.99.1",
+    "bcrypt": "^6.0.0",
+    "botbuilder": "^4.23.3",
+    "cors": "^2.8.6",
+    "dotenv": "^17.3.1",
+    "express": "^5.2.1",
+    "express-session": "^1.19.0",
+    "isomorphic-fetch": "^3.0.0",
+    "jsonwebtoken": "^9.0.3",
+    "node-fetch": "^3.3.2",
+    "openai": "^6.22.0",
+    "pg": "^8.18.0",
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0",
+    "twilio": "^5.13.1",
+    "whatsapp-web.js": "^1.34.6"
+  }
+}
