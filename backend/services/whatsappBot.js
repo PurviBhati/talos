@@ -12,6 +12,23 @@ const __dirname = path.dirname(__filename);
 const { Client, LocalAuth, MessageMedia } = pkg;
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || "tenant-default";
 
+function normalizeName(value = '') {
+  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function isMutedSenderForGroup(senderName = '', groupName = '') {
+  const senderNorm = normalizeName(senderName);
+  const groupNorm = normalizeName(groupName);
+
+  // Requested mute: only this person in this group.
+  const isTargetGroup = groupNorm.includes('deepgrp') || groupNorm.includes('deepwebsite');
+  const isTargetSender =
+    senderNorm === 'mayurbhaia' ||
+    senderNorm.includes('mayurbhaia');
+
+  return isTargetGroup && isTargetSender;
+}
+
 class WhatsAppBot {
   constructor() {
     this.client = null;
@@ -219,6 +236,22 @@ class WhatsAppBot {
 
         const messageId = result.rows[0]?.id;
         console.log(`💾 Saved WhatsApp message (id: ${messageId}) [inbound]`);
+
+        const mutedSender = isMutedSenderForGroup(senderName, groupName);
+        if (mutedSender && messageId) {
+          await db(
+            `UPDATE whatsapp_messages
+             SET batch_scanned = TRUE,
+                 ai_should_forward = FALSE,
+                 ai_category = 'muted_sender',
+                 ai_priority = 'low',
+                 ai_reason = 'Muted sender in this group by user rule'
+             WHERE id = $1`,
+            [messageId]
+          ).catch(() => {});
+          console.log(`🔇 Muted sender rule applied for "${senderName}" in "${groupName}"`);
+          return;
+        }
 
         // ─── Auto-summarize ───────────────────────────────────────────
         if (groupName && messageId) {

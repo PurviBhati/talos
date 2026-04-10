@@ -1,12 +1,10 @@
 import { WebClient } from "@slack/web-api";
 import { query } from "../db/index.js";
-import OpenAI from "openai";
 import { uploadSlackFileToSupabase } from "./storageService.js";
 import { filterExtractedTasksForForward } from "../utils/forwardPolicy.js";
+import { getOpenAIClient, getOpenAIModel } from "./runtimeAiConfig.js";
 
 const slack = new WebClient(process.env.SLACK_BOT_TOKEN);
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 
 // Forward on every new client reply
 const FORWARD_EVERY_N = 1;
@@ -187,8 +185,8 @@ Return ONLY valid JSON, no markdown:
 
 If no actionable task or approval, return: null`;
 
-  const response = await openai.chat.completions.create({
-    model: OPENAI_MODEL,
+  const response = await getOpenAIClient().chat.completions.create({
+    model: getOpenAIModel(),
     temperature: 0.2,
     max_tokens: 600,
     messages: [{ role: "user", content: prompt }],

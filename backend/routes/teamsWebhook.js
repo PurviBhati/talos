@@ -151,7 +151,6 @@ router.post("/webhook", async (req, res) => {
 
       // ✅ Check monitored chats
       if (MONITORED_CHAT_IDS.length > 0 && !MONITORED_CHAT_IDS.includes(sourceId)) {
-        console.log(`⏭️ Skipping unmonitored chat: ${sourceId}`);
         continue;
       }
       console.log(`✅ Monitored chat matched: ${sourceId}`);
@@ -276,13 +275,18 @@ router.post("/webhook", async (req, res) => {
       const savedId = insertResult.rows[0]?.id;
       console.log(`💾 Saved message from ${sender} (id: ${savedId}): "${cleanText.slice(0, 60)}" ${isIgnored ? '(AUTO-IGNORED)' : ''}`);
 
-      // ✅ Run OpenClaw analysis for text messages
-      if (!isIgnored && cleanText && cleanText.length > 0) {
+      // ✅ Run OpenClaw analysis for text and image-only messages
+      if (!isIgnored && ((cleanText && cleanText.length > 0) || files.length > 0)) {
+        const mediaUrls = files
+          .map((f) => f.publicUrl || f.url)
+          .filter((u) => typeof u === 'string' && /^https?:\/\//i.test(u));
         runAgentAnalysis({
           source: "teams",
           sender,
-          content: cleanText,
+          content: cleanText || '[Image-only message]',
           messageId: savedId,
+          files,
+          mediaUrls,
         }).catch(err => console.error("OpenClaw Teams analysis error:", err.message));
       }
 

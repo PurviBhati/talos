@@ -28,7 +28,6 @@ def run_full_summarization():
                     source=ch["source"],
                     channel_id=ch["channel_id"],
                     channel_col=ch["channel_col"],
-                    limit=10
                 )
 
                 if not messages:

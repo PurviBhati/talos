@@ -1,9 +1,7 @@
-import OpenAI from "openai";
 import dotenv from "dotenv";
 dotenv.config();
+import { getOpenAIClient, getOpenAIModel } from "./runtimeAiConfig.js";
 //aiService.js - handles AI interactions for message classification and draft generation
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 
 /**
  * Classifies an incoming message.
@@ -11,8 +9,8 @@ const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
  */
 export const classifyMessage = async (message) => {
   try {
-    const response = await client.chat.completions.create({
-      model: OPENAI_MODEL,
+    const response = await getOpenAIClient().chat.completions.create({
+      model: getOpenAIModel(),
       temperature: 0.0,
       max_tokens: 300,
       messages: [
@@ -76,8 +74,8 @@ Rules:
  */
 export const generateDraft = async (message) => {
   try {
-    const response = await client.chat.completions.create({
-      model: OPENAI_MODEL,
+    const response = await getOpenAIClient().chat.completions.create({
+      model: getOpenAIModel(),
       temperature: 0.4,
       max_tokens: 300,
       messages: [

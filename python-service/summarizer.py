@@ -1,4 +1,5 @@
 import os
+import re
 from pathlib import Path
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -11,6 +12,19 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL_CANDIDATES = [
     m.strip() for m in os.getenv("OPENAI_SUMMARY_MODELS", "gpt-4o").split(",") if m.strip()
 ]
+try:
+    SUMMARY_MAX_TOKENS = max(200, min(4096, int(os.getenv("OPENAI_SUMMARY_MAX_TOKENS", "1200"))))
+except ValueError:
+    SUMMARY_MAX_TOKENS = 1200
+
+
+def _strip_html(text: str) -> str:
+    """Teams/Slack bodies are often HTML; strip tags so the model sees substance, not markup noise."""
+    if not text:
+        return ""
+    s = re.sub(r"<[^>]+>", " ", text)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
 
 
 def build_prompt(source: str, channel_name: str, messages: list) -> str:
@@ -23,7 +37,8 @@ def build_prompt(source: str, channel_name: str, messages: list) -> str:
     lines = []
     for msg in ordered:
         sender = msg.get("sender", "Unknown")
-        body = (msg.get("body") or "").strip()
+        raw = (msg.get("body") or "").strip()
+        body = _strip_html(raw) if raw else ""
         if body:
             lines.append(f"- {sender}: {body}")
 
@@ -31,35 +46,37 @@ def build_prompt(source: str, channel_name: str, messages: list) -> str:
 
     prompt = f"""You are analyzing a business conversation for AppsRow, a Webflow agency.
 
-    Platform: {source.upper()}
-    Channel / Group: {channel_name}
+Platform: {source.upper()}
+Channel / Group: {channel_name}
 
-    Last {len(messages)} messages:
-    {conversation_text}
+Last {len(messages)} messages (oldest → newest):
+{conversation_text}
 
-    Extract the following from these messages. Return ONLY what actually exists — do not invent anything.
+Your PRIMARY output is TASKS: a complete list of work discussed — not links alone.
 
-    Return in this exact format (skip a section entirely if nothing found):
+Under TASKS, include EVERY distinct item that implies work, follow-up, or a decision, for example:
+- explicit asks ("please change…", "can you…", "we need…")
+- approvals / rejections that imply next steps
+- bugs, content changes, design tweaks, deadlines, owners ("Parth will…")
+- open questions that someone must answer or resolve
+- status updates that create new follow-ups
 
-    TASKS:
-    - [First actionable task]
-    - [Second actionable task]
-    FILES: [Comma-separated list of any file names mentioned. If none, skip this line.]
-    LINKS: [Comma-separated list of any URLs. If none, skip this line.]
+Use one bullet per distinct item. Merge duplicates; split combined asks into separate bullets when they are different pieces of work.
+Resolve vague pronouns using context (e.g. "make that bigger" → name the exact section/component).
 
-    RESOLVE AMBIGUITY: If the client says "make that bigger," look at the context to identify exactly WHAT "that" is (e.g., "The Hero H1 Heading").
+LINKS and FILES are SECONDARY: only list URLs or file names that support the work above. Do not dump every URL from HTML if it is not relevant to a task. Deduplicate links.
 
+Return ONLY the following structure. Do not add preamble or closing commentary.
 
-    Rules:  
-    - TASKS should include every clear actionable request in these messages (not just one)
-    - Use bullet points under TASKS (one line per task)
-    - Each task item should be specific: what was requested, what needs to change, and short context
-    - FILES should be exact file names, or "image" if a file was shared without a name
-    - LINKS must be complete valid URLs starting with http:// or https://
-    - If a field has nothing, skip that line entirely
-    - If images are mentioned, describe their visual intent (e.g., "Screenshot of footer alignment issue").
-    - Return only the single word NO_ACTION if ALL three fields are empty
-    - Do not write any explanation or extra text"""
+TASKS:
+- [Specific actionable item 1]
+- [Specific actionable item 2]
+FILES: [Comma-separated file names if any; omit line if none]
+LINKS: [Comma-separated http(s) URLs if any; omit line if none]
+
+Rules:
+- If there are genuinely no tasks, files, or links, return exactly: NO_ACTION
+- Do not invent work that is not grounded in the messages"""
 
     return prompt
 
@@ -106,10 +123,11 @@ def summarize_channel(source: str, channel_name: str, messages: list) -> tuple:
                     {
                         "role": "system",
                         "content": (
-                            "You are a precise data extraction assistant for AppsRow, a Webflow agency. "
-                            "Your only job is to extract tasks, file names, and links from messages. "
-                            "Never summarize. Never add context. Never explain. "
-                            "Return only what is explicitly present in the messages."
+                            "You are a thorough project assistant for AppsRow (Webflow agency). "
+                            "From chat logs you must list every discussed task, follow-up, and decision that implies work. "
+                            "Tasks come first and must be complete; links and files are supporting details only. "
+                            "Stay faithful to the messages — do not fabricate. "
+                            "Output only the structured format requested by the user."
                         )
                     },
                     {
@@ -117,8 +135,8 @@ def summarize_channel(source: str, channel_name: str, messages: list) -> tuple:
                         "content": prompt
                     }
                 ],
-                max_tokens=150,
-                temperature=0.0,
+                max_tokens=SUMMARY_MAX_TOKENS,
+                temperature=0.1,
             )
 
             result = (response.choices[0].message.content or "").strip()
@@ -148,16 +166,31 @@ def format_extraction_for_teams(raw_result: str) -> str:
     if not raw_result or raw_result.strip() == "NO_ACTION":
         return ""
 
-    lines = raw_result.strip().splitlines()
+    text = raw_result.strip()
     formatted = []
 
-    for line in lines:
+    if re.search(r"(?im)^\s*TASKS:\s*", text):
+        m = re.search(r"(?is)TASKS:\s*(.*?)(?=^\s*(?:FILES:|LINKS:)|\Z)", text)
+        if m:
+            for line in m.group(1).strip().splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line.startswith(("-", "•")):
+                    line = line.lstrip("-•").strip()
+                elif line.upper().startswith("TASK:"):
+                    line = line[5:].strip()
+                if line:
+                    formatted.append(f"📌 *Task:* {line}")
+    else:
+        for line in text.splitlines():
+            ls = line.strip()
+            if ls.upper().startswith("TASK:") and not ls.upper().startswith("TASKS:"):
+                formatted.append(f"📌 *Task:* {ls[5:].strip()}")
+
+    for line in text.splitlines():
         line = line.strip()
-        if line.startswith("TASK:"):
-            value = line[5:].strip()
-            if value:
-                formatted.append(f"📌 *Task:* {value}")
-        elif line.startswith("FILES:"):
+        if line.startswith("FILES:"):
             value = line[6:].strip()
             if value:
                 formatted.append(f"📎 *Files:* {value}")

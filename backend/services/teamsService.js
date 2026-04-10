@@ -155,7 +155,7 @@ export async function sendImageToTeams(conv, senderName, imageName, imageUrl, mi
 
 // ─── ADD THIS FUNCTION TO teamsService.js ────────────────────────────────────
 
-export async function sendTaskCardToTeams(conversationId, { task, description, sender, groupName, files = [], links = [], mediaUrls = [] }) {  const ref = await conversationStore.getById(conversationId);
+export async function sendTaskCardToTeams(conversationId, { task, description, sender, groupName, files = [], links = [], mediaUrls = [], mediaInsights = [] }) {  const ref = await conversationStore.getById(conversationId);
   if (!ref) throw new Error(`Conversation not found: ${conversationId}`);
 
   const conversationReference = {
@@ -174,9 +174,17 @@ export async function sendTaskCardToTeams(conversationId, { task, description, s
      ``,
     `**Task:** ${task}`,
   ];
-  if (description) {
+  const normalizedTask = String(task || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const normalizedDescription = String(description || '').replace(/\s+/g, ' ').trim().toLowerCase();
+  const shouldShowDescription = !!description && normalizedDescription && normalizedDescription !== normalizedTask;
+  if (shouldShowDescription) {
   lines.push(``);
   lines.push(description);
+  }
+  if (Array.isArray(mediaInsights) && mediaInsights.length > 0) {
+    lines.push(``);
+    lines.push(`🖼️ **Media Insights:**`);
+    mediaInsights.forEach((m) => lines.push(`• ${m}`));
   }
 
   if (files.length > 0) lines.push(`📎 Files: ${files.join(', ')}`);

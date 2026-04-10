@@ -65,8 +65,9 @@ DEFAULT_COUNTRY_CODE=+91
 SUPABASE_URL=https://your-project.supabase.co
 SUPABASE_SERVICE_KEY=your_service_role_key
 SUPABASE_BUCKET=talos
-
-DATABASE_URL=postgresql://user:password@localhost:5432/talos
+SUPABASE_DB_URL=postgresql://postgres.<project_ref>:<db_password>@<region>.pooler.supabase.com:6543/postgres
+DATABASE_URL=
+ALLOW_LOCAL_DB=false
 SLACK_BATCH_SCANNER_ENABLED=true
 RETRY_FORWARDS_ENABLED=true
 WHATSAPP_GROUP_JID_MAP={"whatsapp:123@g.us":"Group A","whatsapp:456@g.us":"Group B"}
@@ -77,6 +78,51 @@ Notes:
 
 - Keep secrets only in `.env` files (never commit keys).
 - `python-service` loads env from `python-service/.env` and also from `backend/.env`.
+- Database now runs in Supabase Postgres by default (`SUPABASE_DB_URL`); local DB is blocked unless `ALLOW_LOCAL_DB=true`.
+
+## Switch To Another Supabase Account
+
+To move Talos to a different Supabase project, you only need to update account-specific values and apply schema:
+
+1. Update (or copy from `backend/.env.supabase.template`) these values in `backend/.env`:
+   - `SUPABASE_URL`
+   - `SUPABASE_SERVICE_KEY`
+   - `SUPABASE_BUCKET`
+   - `SUPABASE_DB_URL`
+2. Keep `ALLOW_LOCAL_DB=false` and keep `DATABASE_URL=` empty.
+3. Apply schema to the new database:
+
+### Windows (PowerShell)
+
+```powershell
+./scripts/supabase-apply-schema.ps1
+```
+
+Optional explicit DB URL:
+
+```powershell
+./scripts/supabase-apply-schema.ps1 -DbUrl "postgresql://..."
+```
+
+### Ubuntu/Linux/macOS
+
+```bash
+bash ./scripts/supabase-apply-schema.sh
+```
+
+Optional explicit DB URL:
+
+```bash
+bash ./scripts/supabase-apply-schema.sh "postgresql://..."
+```
+
+4. (Optional) Seed mapping data:
+
+```bash
+psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f database/mappings_data.sql
+```
+
+5. Restart backend (`backend/server.js`) and verify health/dashboard routes.
 
 ## Installation
 

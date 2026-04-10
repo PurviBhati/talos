@@ -10,12 +10,10 @@
 //   5. Marks messages as batch_scanned = TRUE
 
 import { query } from '../db/index.js';
-import OpenAI from 'openai';
 import { getClientHistory, updateClientHistory, formatHistoryForPrompt } from './clientHistory.js';
 import { filterExtractedTasksForForward } from '../utils/forwardPolicy.js';
+import { getOpenAIClient, getOpenAIModel } from './runtimeAiConfig.js';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 
 const SCAN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const SCAN_WINDOW_MINS = 30;
@@ -30,6 +28,35 @@ function isLikelyTaskText(text = '') {
     'make', 'need', 'issue', 'bug', 'error', 'not working', 'kindly'
   ];
   return keywords.some((k) => t.includes(k));
+}
+
+function normalizeTaskText(value = '') {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function dedupeTasks(tasks = []) {
+  const out = [];
+  const seen = new Set();
+  for (const task of tasks) {
+    const title = normalizeTaskText(task?.title || '');
+    const desc = normalizeTaskText(task?.description || '');
+    if (!title && !desc) continue;
+    const key = `${title}|${desc.slice(0, 120)}`;
+    if (seen.has(key)) continue;
+    const near = out.some((t) => {
+      const tTitle = normalizeTaskText(t?.title || '');
+      if (!title || !tTitle) return false;
+      return title === tTitle || title.includes(tTitle) || tTitle.includes(title);
+    });
+    if (near) continue;
+    seen.add(key);
+    out.push(task);
+  }
+  return out;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -162,8 +189,8 @@ Return ONLY a valid JSON array, no markdown, no explanation:
 Messages:
 ${messageBlock}`;
 
-  const response = await openai.chat.completions.create({
-    model: OPENAI_MODEL,
+  const response = await getOpenAIClient().chat.completions.create({
+    model: getOpenAIModel(),
     temperature: 0.2,
     max_tokens: 1500,
     messages: [{ role: 'user', content: prompt }],
@@ -239,7 +266,8 @@ async function scanChannel(channel) {
   const history = await getClientHistory(tenant_id, 'slack', slack_channel_id);
 
   const rawTasks = await extractTasks(allMessages, slack_channel_name, history);
-  const tasks = filterExtractedTasksForForward(rawTasks);
+  const filteredTasks = filterExtractedTasksForForward(rawTasks);
+  const tasks = dedupeTasks(filteredTasks);
 
   if (!tasks.length) {
     if (rawTasks.length > 0) {
@@ -257,6 +285,9 @@ async function scanChannel(channel) {
     return { channel: slack_channel_name, tasksFound: 0, status: 'no_tasks' };
   }
 
+  if (filteredTasks.length !== tasks.length) {
+    console.log(`🧹 "#${slack_channel_name}" — deduped ${filteredTasks.length - tasks.length} near-duplicate task(s)`);
+  }
   console.log(`✅ "#${slack_channel_name}" — ${tasks.length} task(s) found`);
 
   const { sendToGroupChat, sendImageToGroupChat } = await import('./teamsService.js');

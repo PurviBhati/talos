@@ -7,10 +7,8 @@
 // full context of what the client has requested in the past.
 
 import { query } from '../db/index.js';
-import OpenAI from 'openai';
+import { getOpenAIClient, getOpenAIModel } from './runtimeAiConfig.js';
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o";
 
 const HISTORY_DAYS = 25;
 
@@ -82,8 +80,8 @@ export async function updateClientHistory(tenantId, source, groupId, groupName, 
 
         Return ONLY the updated history log, no explanation, no markdown.`;
 
-      const response = await openai.chat.completions.create({
-        model: OPENAI_MODEL,
+      const response = await getOpenAIClient().chat.completions.create({
+        model: getOpenAIModel(),
         temperature: 0,
         max_tokens: 1000,
         messages: [{ role: 'user', content: prompt }],

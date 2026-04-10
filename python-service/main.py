@@ -87,7 +87,6 @@ async def summarize_all():
                     source=ch["source"],
                     channel_id=ch["channel_id"],
                     channel_col=ch["channel_col"],
-                    limit=20
                 )
 
                 if not messages:
@@ -164,7 +163,6 @@ async def summarize_one(source: str, channel_id: str):
             source=source,
             channel_id=channel_id,
             channel_col=col,
-            limit=20
         )
 
         if not messages:

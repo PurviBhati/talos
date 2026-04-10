@@ -295,6 +295,15 @@ async function runMigrations() {
     await query(`CREATE INDEX IF NOT EXISTS idx_client_history_tenant_source_group ON client_history(tenant_id, source, group_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_whatsapp_batch_tasks_tenant_id ON whatsapp_batch_tasks(tenant_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_slack_threads_tenant_id ON slack_threads(tenant_id)`);
+    await query(`
+      CREATE TABLE IF NOT EXISTS system_settings (
+        id SERIAL PRIMARY KEY,
+        setting_key TEXT UNIQUE NOT NULL,
+        setting_value JSONB NOT NULL DEFAULT '{}'::jsonb,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      )
+    `);
+    await query(`CREATE INDEX IF NOT EXISTS idx_system_settings_key ON system_settings(setting_key)`);
     console.log("DB migrations complete");
   } catch (err) {
     console.error("Migration error:", err.message);

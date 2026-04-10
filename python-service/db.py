@@ -2,18 +2,36 @@ import os
 import requests
 import psycopg
 from psycopg.rows import dict_row
-
-# Hardcoded fallback — no dotenv needed
-DATABASE_URL = os.environ.get(
-    "DATABASE_URL",
-    "postgresql://postgres:appsrow123@localhost:5432/unifiedhub"
-)
+from typing import Optional
 
 NODE_URL = os.environ.get("NODE_URL", "http://localhost:5000")
+def _clamp_int_env(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        v = int(os.environ.get(name, str(default)))
+        return max(lo, min(hi, v))
+    except ValueError:
+        return default
+
+
+# How many recent messages to feed into summarization (per channel)
+SUMMARY_MESSAGE_LIMIT = _clamp_int_env("SUMMARY_MESSAGE_LIMIT", 40, 5, 80)
 
 
 def get_connection():
-    return psycopg.connect(DATABASE_URL, row_factory=dict_row)
+    database_url = os.environ.get("SUPABASE_DB_URL") or os.environ.get("DATABASE_URL")
+    allow_local_db = (os.environ.get("ALLOW_LOCAL_DB", "").strip().lower() == "true")
+
+    if not database_url:
+        raise RuntimeError("Database is not configured. Set SUPABASE_DB_URL (preferred) or DATABASE_URL.")
+
+    if (("localhost" in database_url) or ("127.0.0.1" in database_url)) and not allow_local_db:
+        raise RuntimeError("Local database is disabled. Set SUPABASE_DB_URL and keep ALLOW_LOCAL_DB=false.")
+
+    dsn = database_url
+    if ("supabase.com" in dsn or "pooler.supabase.com" in dsn) and "sslmode=" not in dsn:
+        dsn = f"{dsn}{'&' if '?' in dsn else '?'}sslmode=require"
+
+    return psycopg.connect(dsn, row_factory=dict_row)
 
 
 def _safe_get_json(url: str):
@@ -81,7 +99,9 @@ def fetch_all_channels():
     return channels
 
 
-def fetch_last_messages(source: str, channel_id: str, channel_col: str, limit: int = 20):
+def fetch_last_messages(source: str, channel_id: str, channel_col: str, limit: Optional[int] = None):
+    if limit is None:
+        limit = SUMMARY_MESSAGE_LIMIT
     try:
         if source == "slack":
             messages = _safe_get_json(f"{NODE_URL}/api/slack/messages")
