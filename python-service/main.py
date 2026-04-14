@@ -21,9 +21,24 @@ load_dotenv(BASE_DIR / ".env", override=False)
 load_dotenv(BASE_DIR.parent / "backend" / ".env", override=True)
 
 
+def get_cors_origins():
+    configured = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "").split(",") if origin.strip()]
+    if configured:
+        return configured
+    return [
+        "http://localhost:3000",
+        "http://localhost:3001",
+        "http://localhost:3002",
+        "http://localhost:3003",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
+        "http://localhost:5000",
+    ]
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print("🚀 OpenClaw Python Service starting...")
+    print("[startup] OpenClaw Python Service starting...")
     from db import get_connection
     conn = get_connection()
     try:
@@ -32,14 +47,14 @@ async def lifespan(app: FastAPI):
             cur.execute("ALTER TABLE channel_summaries ADD COLUMN IF NOT EXISTS image_urls TEXT[] DEFAULT '{}'")
             cur.execute("ALTER TABLE channel_summaries ADD COLUMN IF NOT EXISTS latest_message_at TIMESTAMPTZ")
             conn.commit()
-        print("✅ DB migrations done")
+        print("[ok] DB migrations done")
     except Exception as e:
-        print(f"⚠️ Migration warning: {e}")
+        print(f"[warn] Migration warning: {e}")
     finally:
         conn.close()
 
     start_scheduler()
-    print("✅ Python service ready on port 8000")
+    print("[ok] Python service ready on port 8000")
     yield
 
 
@@ -52,10 +67,7 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3000",
-        "http://localhost:5000",
-    ],
+    allow_origins=get_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -124,7 +136,7 @@ async def summarize_all():
                 })
 
             except Exception as e:
-                print(f"❌ Error summarizing [{ch['source']}] {ch['channel_name']}: {e}")
+                print(f"[error] Error summarizing [{ch['source']}] {ch['channel_name']}: {e}")
                 results.append({
                     "source": ch["source"],
                     "channel": ch["channel_name"],
@@ -133,7 +145,7 @@ async def summarize_all():
                 })
 
         success = sum(1 for r in results if r["status"] == "success")
-        print(f"✅ Summarization complete: {success}/{len(channels)} channels")
+        print(f"[ok] Summarization complete: {success}/{len(channels)} channels")
         return {
             "success": True,
             "total_channels": len(channels),

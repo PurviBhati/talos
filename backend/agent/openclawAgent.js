@@ -88,6 +88,8 @@ function quickReject(content) {
     return null;
   }
 
+  // Keep quick-reject intentionally narrow: only obvious non-actionable chatter.
+  // Everything else should go through AI classification.
   const patterns = [
     /^(hi|hello|hey|hii|heyy|yo|sup|howdy|hows\s*everything)[\s!?.]*$/i,
     /^(good\s*(morning|afternoon|evening|night|day))[\s!?.]*$/i,
@@ -95,15 +97,14 @@ function quickReject(content) {
     /^[\u{1F300}-\u{1FFFF}\s!?.]+$/u,
     /^(👋|🙏|😊|❤️|🔥|💯|😄|🎉|✔️|🤝)[\s]*$/,
     /^can\s*we\s*(talk|connect|hop on|jump on|have a call|meet|catch up)[\s!?.]*$/i,
-    /^are\s*you\s*free\s*(at|on|today|tomorrow|tonight)/i,
-    /^(let's|lets)\s*schedule\s*(a\s*)?(call|meeting|meet|otp|verification)/i,
-    /\b(invoice|invoices|payment|billing|quote|quotation|tax invoice|purchase order)\b/i,
-    /\b(meet(ing)?\s+(tomorrow|today|on|at)|schedule\s+(a\s*)?(call|meeting|sync)|calendar\s+invite|book\s+(a\s*)?(slot|time))\b/i,
+    /^are\s*you\s*free\s*(at|on|today|tomorrow|tonight)[\s!?.]*$/i,
+    /^(let's|lets)\s*schedule\s*(a\s*)?(call|meeting|meet|otp|verification)[\s!?.]*$/i,
   ];
 
   for (const p of patterns) {
     if (p.test(lower)) return `greeting/meeting: "${content.trim()}"`;
   }
+
   return null;
 }
 
@@ -153,6 +154,12 @@ NEVER set should_forward true for:
 - Invoices, payments, billing, quotes, POs, money discussions
 - General chat, small talk, greetings-only, thanks-only, social conversation
 - News, jokes, unrelated topics
+
+MIXED-INTENT RULE (VERY IMPORTANT):
+- Clients may combine actionable work + non-actionable text in one message.
+- If ANY actionable work item exists, set should_forward=true and extract ONLY actionable parts into tasks/summary.
+- Do NOT reject the whole message just because it also contains payment, greeting, or meeting text.
+- Example: "hello, update footer/sidebar, and tell me payment amount" => should_forward=true (for update task), category="change_request", reason should mention mixed intent.
 
 CLIENT APPROVAL: "ok", "👍", "approved", "looks good" → should_forward true ONLY when clearly approving **project work** (design, page, build, milestone). If ambiguous or general assent with no work context → should_forward false, category "general_chat".
 

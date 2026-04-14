@@ -36,6 +36,8 @@ const TASK_LIKE = new Set([
 
 const BLOCKED_CONTENT_RE =
   /\b(meet(ing)?|schedule|scheduled|reschedul(e|ed|ing)|calendar|availability|available (now|today|tomorrow)|call\b|zoom\b|google meet|teams meeting|invoice|invoices|billing|payment|payments|quotation|quote|proforma|po\b|purchase order)\b/i;
+const ACTIONABLE_HINT_RE =
+  /\b(update|fix|footer|sidebar|header|layout|page|screen|ui|ux|design|dev|develop|build|issue|bug|change|task|implement|revise|modify|deploy|live|urgent)\b/i;
 
 export function isForwardEligibleCategory(category) {
   if (category == null || category === "") return false;
@@ -56,7 +58,12 @@ export function hasBlockedForwardContent(...parts) {
     .join(" ")
     .toLowerCase();
   if (!text.trim()) return false;
-  return BLOCKED_CONTENT_RE.test(text);
+  // Allow mixed-intent messages through when they contain actionable work.
+  if (ACTIONABLE_HINT_RE.test(text)) return false;
+
+  // Keep deterministic guardrail for short pure scheduling/billing chatter.
+  const isShortMetaChat = text.length <= 140;
+  return isShortMetaChat && BLOCKED_CONTENT_RE.test(text);
 }
 
 /** Post-filter extracted batch tasks (Slack / WhatsApp scanners) */

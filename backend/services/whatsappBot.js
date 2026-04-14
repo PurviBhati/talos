@@ -56,15 +56,33 @@ class WhatsAppBot {
   }
 
   initializeClient() {
+    const isWin = process.platform === 'win32';
+    const baseArgs = isWin
+      ? [
+          '--disable-gpu',
+          '--disable-dev-shm-usage',
+          '--no-first-run',
+        ]
+      : [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-first-run',
+          '--no-zygote',
+        ];
+
+    const executablePath =
+      process.env.PUPPETEER_EXECUTABLE_PATH ||
+      process.env.CHROME_PATH ||
+      undefined;
+
     this.client = new Client({
       authStrategy: new LocalAuth({ dataPath: this.sessionPath }),
       puppeteer: {
         headless: true,
-        args: [
-          '--no-sandbox', '--disable-setuid-sandbox',
-          '--disable-dev-shm-usage', '--disable-accelerated-2d-canvas',
-          '--no-first-run', '--no-zygote', '--single-process', '--disable-gpu'
-        ]
+        args: baseArgs,
+        ...(executablePath ? { executablePath } : {}),
       }
     });
     this.setupEventHandlers();
@@ -278,12 +296,12 @@ class WhatsAppBot {
         }
 
         // ─── OpenClaw AI analysis ─────────────────────────────────────
-        if (message.body?.trim()) {
+        if ((message.body && message.body.trim()) || mediaUrls.length > 0) {
           const { runAgentAnalysis } = await import('../agent/openclawAgent.js');
           runAgentAnalysis({
             source: 'whatsapp',
             sender: senderName,
-            content: message.body || '',
+            content: (message.body && message.body.trim()) ? message.body : '[media-only message]',
             messageId,
             mediaUrls,
           }).catch(err => console.error('OpenClaw error:', err.message));
@@ -326,7 +344,14 @@ class WhatsAppBot {
         await this.client.initialize();
       } catch (retryError) {
         console.error('❌ Failed to recover:', retryError);
-        this.scheduleReconnect();
+        // If Chromium profile lock persists, do a hard LocalAuth reset so bot can
+        // come back with a fresh QR flow instead of staying stuck on startup.
+        try {
+          await this.resetSession();
+        } catch (resetError) {
+          console.error('❌ Failed to reset session after startup lock:', resetError);
+          this.scheduleReconnect();
+        }
       }
     } else {
       this.scheduleReconnect();
@@ -336,12 +361,32 @@ class WhatsAppBot {
   async forceCleanup() {
     try {
       if (this.client) await this.client.destroy();
+      // Remove stale Chromium lock artifacts in the LocalAuth profile.
+      // These files are commonly left behind after abrupt process exits and
+      // trigger "browser is already running" on next boot.
+      const lockFiles = [
+        path.join(this.sessionPath, 'lockfile'),
+        path.join(this.sessionPath, 'SingletonLock'),
+        path.join(this.sessionPath, 'SingletonCookie'),
+        path.join(this.sessionPath, 'SingletonSocket'),
+        path.join(this.sessionPath, 'DevToolsActivePort'),
+      ];
+      for (const file of lockFiles) {
+        try {
+          if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+        } catch {}
+      }
+
+      // Keep this as a fallback for headless chromium zombies.
       const { exec } = await import('child_process');
       const { promisify } = await import('util');
       const execAsync = promisify(exec);
       try {
-        if (process.platform === 'win32') await execAsync('taskkill /f /im chrome.exe');
-        else await execAsync('pkill -f "chrome.*whatsapp"');
+        if (process.platform === 'win32') {
+          await execAsync('taskkill /f /im chrome.exe');
+        } else {
+          await execAsync('pkill -f "chrome.*whatsapp"');
+        }
       } catch {}
       console.log('🧹 Force cleanup completed');
     } catch (error) {

@@ -5,7 +5,8 @@ export const SELECTED_WHATSAPP_GROUPS = [
   "Sellers Umbrella - MXP Webflow Development",
   "Avishkar Branding",
   "Deep Website",
-  "Test-grp"
+  "Test-grp",
+  "GdI webflow"
 ];
 
 // You can modify this list to include only the groups you want to use

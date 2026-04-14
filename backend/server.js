@@ -1,6 +1,6 @@
 import dotenv from "dotenv";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 //server.js is the main entry point for the Express server. It sets up middleware, routes, and background jobs for the Unified Hub application. It also includes feature flags to enable or disable certain functionalities like message cleanup, WhatsApp bot, and background scanning. The server listens on a specified port and initializes necessary services on startup.
 import express from "express";
 import cors from "cors";
@@ -52,13 +52,22 @@ function isFeatureEnabled(name, defaultValue = true) {
   return String(value).toLowerCase() !== "false";
 }
 
-app.use(cors({
-  origin: [
+function getCorsOrigins() {
+  const configured = String(process.env.CORS_ORIGINS || "")
+    .split(",")
+    .map((origin) => origin.trim())
+    .filter(Boolean);
+  if (configured.length > 0) return configured;
+  return [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://localhost:3002",
     "http://localhost:3003",
-  ],
+  ];
+}
+
+app.use(cors({
+  origin: getCorsOrigins(),
   credentials: true,
 }));
 

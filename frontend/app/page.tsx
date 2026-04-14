@@ -8,7 +8,11 @@ const API =
   (typeof window !== 'undefined'
     ? `http://${window.location.hostname}:5000`
     : 'http://localhost:5000');
-const PYTHON_API = 'http://localhost:8000';
+const PYTHON_API =
+  process.env.NEXT_PUBLIC_PYTHON_API_URL ||
+  (typeof window !== 'undefined'
+    ? `http://${window.location.hostname}:8000`
+    : 'http://localhost:8000');
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('style');
@@ -1196,11 +1200,34 @@ function SummariesSection() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [dismissing, setDismissing] = useState<string | null>(null);
+  const getPythonApiCandidates = useCallback(() => {
+    const configured = process.env.NEXT_PUBLIC_PYTHON_API_URL;
+    if (configured) return [configured];
+    if (typeof window === 'undefined') return ['http://localhost:8000'];
+    const host = window.location.hostname;
+    const primary = `http://${host}:8000`;
+    const localFallback = ['localhost', '127.0.0.1'].includes(host) ? ['http://localhost:8000', 'http://127.0.0.1:8000'] : [];
+    return [primary, ...localFallback];
+  }, []);
+
+  const fetchFromPython = useCallback(async (path: string, init?: RequestInit) => {
+    const candidates = getPythonApiCandidates();
+    let lastError: unknown = null;
+    for (const base of candidates) {
+      try {
+        const response = await fetch(`${base}${path}`, init);
+        return response;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    throw lastError || new Error('Python API request failed');
+  }, [getPythonApiCandidates]);
 
   const fetchSummaries = useCallback(async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${PYTHON_API}/summaries`);
+      const r = await fetchFromPython('/summaries');
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const data = await r.json();
       const sorted = (data.summaries || []).sort(
@@ -1213,14 +1240,14 @@ function SummariesSection() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [fetchFromPython]);
 
   useEffect(() => { fetchSummaries(); }, [fetchSummaries]);
 
   const triggerRefresh = async () => {
     setRefreshing(true);
     try {
-      await fetch(`${PYTHON_API}/summarize/all`, { method: 'POST' });
+      await fetchFromPython('/summarize/all', { method: 'POST' });
       await fetchSummaries();
     } catch (err) {
       console.error('[Summarize]', err);
@@ -1233,7 +1260,7 @@ function SummariesSection() {
     const key = `${source}:${channelId}`;
     setDismissing(key);
     try {
-      await fetch(`${PYTHON_API}/summary/${source}/${encodeURIComponent(channelId)}/dismiss`, { method: 'POST' });
+      await fetchFromPython(`/summary/${source}/${encodeURIComponent(channelId)}/dismiss`, { method: 'POST' });
       setSummaries(prev => prev.filter(s => !(s.source === source && s.channel_id === channelId)));
     } catch (err) {
       console.error('[Dismiss]', err);
@@ -1533,8 +1560,15 @@ function ForwardLogSection() {
       try {
         r = await fetch(`${API}/api/forward-logs?${params}`);
       } catch {
-        // Fallback for local setups where API base env is stale.
-        r = await fetch(`http://localhost:5000/api/forward-logs?${params}`);
+        // Local fallback only; deployed frontend must use NEXT_PUBLIC_API_URL.
+        if (
+          typeof window !== 'undefined' &&
+          (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
+        ) {
+          r = await fetch(`http://${window.location.hostname}:5000/api/forward-logs?${params}`);
+        } else {
+          throw new Error('API base URL is unreachable. Set NEXT_PUBLIC_API_URL.');
+        }
       }
       const data = await r.json();
       setLogs(Array.isArray(data) ? data : []);

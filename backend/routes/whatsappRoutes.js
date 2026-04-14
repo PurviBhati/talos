@@ -94,12 +94,13 @@ router.post('/webhook', async (req, res) => {
       }).catch(() => {});
     }
 
-    if (routableGroup && incomingMessage.body?.trim()) {
+    if (routableGroup && ((incomingMessage.body && incomingMessage.body.trim()) || hasMedia)) {
       runAgentAnalysis({
         source: 'whatsapp',
         sender: incomingMessage.senderName,
-        content: incomingMessage.body,
+        content: (incomingMessage.body && incomingMessage.body.trim()) ? incomingMessage.body : '[media-only message]',
         messageId,
+        mediaUrls: incomingMessage.mediaUrls || [],
       }).catch(err => console.error('OpenClaw error:', err.message));
     }
 

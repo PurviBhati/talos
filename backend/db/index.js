@@ -1,6 +1,6 @@
 import pkg from 'pg';
 import dotenv from 'dotenv';
-dotenv.config();
+dotenv.config({ quiet: true });
 
 const { Pool } = pkg;
 const databaseUrl = process.env.SUPABASE_DB_URL || process.env.DATABASE_URL;
