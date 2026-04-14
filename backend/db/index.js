@@ -122,6 +122,9 @@ const pool = new Pool({
   maxUses,
 });
 
+let outageBackoffUntil = 0;
+const OUTAGE_BACKOFF_MS = envInt('PG_OUTAGE_BACKOFF_MS', 12000);
+
 let lastPoolErrorSignature = '';
 let lastPoolErrorAt = 0;
 const POOL_ERROR_LOG_COOLDOWN_MS = envInt('PG_POOL_ERROR_LOG_COOLDOWN_MS', 60000);
@@ -141,6 +144,12 @@ pool.query('SELECT 1')
   .catch((err) => console.error('PostgreSQL connection error:', formatDbError(err)));
 
 export async function query(text, params, options = {}) {
+  if (Date.now() < outageBackoffUntil) {
+    const err = new Error('Database temporarily unavailable (backoff active after repeated transient failures).');
+    err.code = 'DB_BACKOFF_ACTIVE';
+    throw err;
+  }
+
   const retries = Number.isInteger(options.retries) ? options.retries : envInt('PG_QUERY_RETRIES', 6);
   const retryDelayMs = Number.isInteger(options.retryDelayMs) ? options.retryDelayMs : envInt('PG_RETRY_BASE_DELAY_MS', 400);
   const retryMaxDelayMs = envInt('PG_RETRY_MAX_DELAY_MS', 8000);
@@ -156,6 +165,7 @@ export async function query(text, params, options = {}) {
       if (!canRetry) {
         if (isTransientDbError(err) && attempt >= retries) {
           console.error(`PostgreSQL query failed after ${retries + 1} attempts:`, formatDbError(err));
+          outageBackoffUntil = Date.now() + OUTAGE_BACKOFF_MS;
         }
         throw err;
       }
@@ -173,6 +183,7 @@ export async function query(text, params, options = {}) {
     }
   }
 
+  outageBackoffUntil = Date.now() + OUTAGE_BACKOFF_MS;
   throw lastErr;
 }
 

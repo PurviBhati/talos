@@ -1,5 +1,6 @@
 import { BotFrameworkAdapter, MessageFactory } from 'botbuilder';
 import conversationStore from './conversationStore.js';
+import { getAccessToken } from './graphservice.js';
 //teamsService.js
 export const adapter = new BotFrameworkAdapter({
   appId: process.env.CLIENT_ID,
@@ -17,9 +18,48 @@ function isRosterError(err) {
   return code === "BotNotInConversationRoster" || msg.includes("not part of the conversation roster");
 }
 
+function isLikelyChatId(conversationId = '') {
+  const id = String(conversationId || '').trim();
+  return id.startsWith('19:') && (id.includes('@thread.v2') || id.includes('@unq.gbl.spaces'));
+}
+
+function escapeHtml(text = '') {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+async function sendToChatViaGraph(conversationId, message) {
+  if (!isLikelyChatId(conversationId)) {
+    throw new Error(`Invalid Teams chat id for Graph fallback: ${conversationId}`);
+  }
+  const token = await getAccessToken();
+  const body = escapeHtml(message).replace(/\n/g, '<br/>');
+  const resp = await fetch(`https://graph.microsoft.com/v1.0/chats/${encodeURIComponent(conversationId)}/messages`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      body: { contentType: 'html', content: body },
+    }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) {
+    throw new Error(`Graph chat send failed (${resp.status}): ${JSON.stringify(data)}`);
+  }
+  return { activityId: data?.id || null };
+}
+
 export async function sendToGroupChat(conversationId, message) {
   const ref = await conversationStore.getById(conversationId);
-  if (!ref) throw new Error(`Conversation not found: ${conversationId}`);
+  if (!ref) {
+    console.warn(`⚠️ Conversation ref missing for ${conversationId}; using Graph fallback`);
+    const fallback = await sendToChatViaGraph(conversationId, message);
+    return { activityId: fallback.activityId || `graph-${Date.now()}` };
+  }
 
   console.log(`📤 Sending to: ${ref.conversation_name} (${ref.conversation_id})`);
 
@@ -58,7 +98,12 @@ export async function getAllGroupChats() {
 
 export async function sendImageToGroupChat(conversationId, imageUrl, caption) {
   const ref = await conversationStore.getById(conversationId);
-  if (!ref) throw new Error(`Conversation not found: ${conversationId}`);
+  if (!ref) {
+    console.warn(`⚠️ Conversation ref missing for ${conversationId}; sending image URL via Graph fallback`);
+    const text = caption?.trim() ? `${caption}\n${imageUrl}` : imageUrl;
+    await sendToChatViaGraph(conversationId, text);
+    return;
+  }
 
   const conversationReference = {
     bot: { id: ref.bot_id, name: ref.bot_name },

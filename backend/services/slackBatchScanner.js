@@ -19,6 +19,21 @@ const SCAN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const SCAN_WINDOW_MINS = 30;
 const CONTEXT_MESSAGES = 20;
 
+function isTemporaryDbError(err) {
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    code === 'DB_BACKOFF_ACTIVE' ||
+    code === 'ENOTFOUND' ||
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    msg.includes('temporarily unavailable') ||
+    msg.includes('connection terminated') ||
+    msg.includes('dbhandler')
+  );
+}
+
 function isLikelyTaskText(text = '') {
   const t = String(text || '').toLowerCase();
   if (!t.trim()) return false;
@@ -349,7 +364,16 @@ async function scanChannel(channel) {
 export async function runSlackBatchScan() {
   console.log(`\n⏰ [${new Date().toISOString()}] OpenClaw Slack Batch Scan — START`);
 
-  const channels = await fetchMappedChannels();
+  let channels;
+  try {
+    channels = await fetchMappedChannels();
+  } catch (err) {
+    if (isTemporaryDbError(err)) {
+      console.warn('⚠️ Slack batch scan skipped: temporary DB outage');
+      return [{ status: 'skipped_db_outage' }];
+    }
+    throw err;
+  }
 
   if (!channels.length) {
     console.log('⚠️  No mapped Slack channels found');

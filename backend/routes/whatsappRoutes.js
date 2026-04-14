@@ -6,6 +6,22 @@ import { SELECTED_WHATSAPP_GROUPS } from '../config/whatsappGroups.js';
 
 const router = express.Router();
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || "tenant-default";
+const whatsappMessagesCache = new Map();
+
+function isTemporaryDbError(error) {
+  const code = String(error?.code || '').toUpperCase();
+  const msg = String(error?.message || '').toLowerCase();
+  return (
+    code === 'DB_BACKOFF_ACTIVE' ||
+    code === 'ENOTFOUND' ||
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    msg.includes('temporarily unavailable') ||
+    msg.includes('connection terminated') ||
+    msg.includes('dbhandler')
+  );
+}
 
 function parseWhatsappJidMap() {
   try {
@@ -106,29 +122,53 @@ router.post('/webhook', async (req, res) => {
 
     res.status(200).send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
   } catch (error) {
+    if (isTemporaryDbError(error)) {
+      console.warn('⚠️ WhatsApp webhook accepted during temporary DB outage:', error.message);
+      return res.status(200).send('<?xml version="1.0" encoding="UTF-8"?><Response></Response>');
+    }
     console.error('❌ WhatsApp webhook error:', error.message);
     res.status(500).send('Error processing message');
   }
 });
 
+function clampInt(value, fallback, min, max) {
+  const n = Number.parseInt(String(value || ''), 10);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
+}
+
 // ─── GET /api/whatsapp/messages ───────────────────────────────────────────────
-// Last 24h to avoid timezone issues with CURRENT_DATE
+// Default is 7 days so backlogged messages remain visible after outages/restarts.
 router.get('/messages', async (req, res) => {
   try {
     const tenantId = req.tenantId || DEFAULT_TENANT_ID;
+    const hours = clampInt(req.query?.hours, 168, 1, 24 * 30);
+    const limit = clampInt(req.query?.limit, 500, 50, 2000);
+    const includeDismissed = String(req.query?.includeDismissed || '').toLowerCase() === 'true';
     const result = await db(
       `SELECT id, sender, sender_phone, body, message_sid,
               timestamp, media_urls, direction, group_name, forwarded_to_teams
        FROM whatsapp_messages 
        WHERE tenant_id = $1
-         AND (dismissed IS NULL OR dismissed = FALSE)
-         AND timestamp >= NOW() - INTERVAL '24 hours'
+         AND ($2::boolean = TRUE OR dismissed IS NULL OR dismissed = FALSE)
+         AND timestamp >= NOW() - ($3::int * INTERVAL '1 hour')
        ORDER BY timestamp DESC
-       LIMIT 200`,
-      [tenantId]
+       LIMIT $4`,
+      [tenantId, includeDismissed, hours, limit]
     );
+    whatsappMessagesCache.set(tenantId, result.rows);
     res.json(result.rows);
   } catch (error) {
+    if (isTemporaryDbError(error)) {
+      const tenantId = req.tenantId || DEFAULT_TENANT_ID;
+      const cached = whatsappMessagesCache.get(tenantId);
+      if (Array.isArray(cached)) {
+        console.warn('⚠️ Returning cached WhatsApp messages due to temporary DB outage');
+        return res.json(cached);
+      }
+      console.warn('⚠️ WhatsApp messages unavailable due to temporary DB outage (no cache)');
+      return res.status(503).json({ error: 'WhatsApp messages temporarily unavailable (database reconnecting). Please retry shortly.' });
+    }
     console.error('❌ Fetch WhatsApp messages error:', error);
     res.status(500).json({ error: error.message });
   }
@@ -164,6 +204,9 @@ router.post('/forward', async (req, res) => {
     console.log(`✅ WhatsApp msg ${msgId} forwarded to Teams chat ${chatId}`);
     res.json({ success: true });
   } catch (error) {
+    if (isTemporaryDbError(error)) {
+      return res.status(503).json({ error: 'Database temporarily unavailable. Please retry shortly.' });
+    }
     console.error('❌ Forward WhatsApp message error:', error);
     res.status(500).json({ error: error.message });
   }
@@ -187,6 +230,9 @@ router.post('/forward-image', async (req, res) => {
     console.log(`✅ WhatsApp image forwarded to Teams: ${chatId}`);
     res.json({ success: true });
   } catch (error) {
+    if (isTemporaryDbError(error)) {
+      return res.status(503).json({ error: 'Database temporarily unavailable. Please retry shortly.' });
+    }
     console.error('❌ WhatsApp forward-image error:', error.message);
     res.status(500).json({ error: error.message });
   }
@@ -210,6 +256,9 @@ router.post('/send', async (req, res) => {
       res.status(500).json({ success: false, error: result.error });
     }
   } catch (error) {
+    if (isTemporaryDbError(error)) {
+      return res.status(503).json({ error: 'Database temporarily unavailable. Please retry shortly.' });
+    }
     res.status(500).json({ error: error.message });
   }
 });
@@ -224,6 +273,9 @@ router.get('/contacts', async (req, res) => {
     );
     res.json(result.rows);
   } catch (error) {
+    if (isTemporaryDbError(error)) {
+      return res.json([]);
+    }
     res.status(500).json({ error: error.message });
   }
 });
@@ -234,6 +286,9 @@ router.get('/test', async (req, res) => {
     const result = await db('SELECT COUNT(*) as count FROM whatsapp_messages WHERE tenant_id = $1', [req.tenantId || DEFAULT_TENANT_ID]);
     res.json({ message: 'WhatsApp routes working', totalMessages: result.rows[0].count, groups: SELECTED_WHATSAPP_GROUPS });
   } catch (error) {
+    if (isTemporaryDbError(error)) {
+      return res.json({ message: 'WhatsApp routes working (DB temporarily unavailable)', totalMessages: 0, groups: SELECTED_WHATSAPP_GROUPS });
+    }
     res.status(500).json({ error: error.message });
   }
 });

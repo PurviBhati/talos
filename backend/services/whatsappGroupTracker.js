@@ -19,6 +19,21 @@ const SCAN_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 const SCAN_WINDOW_MINS = 30;
 const CONTEXT_MESSAGES = 5; // how many previous messages to include as context
 
+function isTemporaryDbError(err) {
+  const code = String(err?.code || '').toUpperCase();
+  const msg = String(err?.message || '').toLowerCase();
+  return (
+    code === 'DB_BACKOFF_ACTIVE' ||
+    code === 'ENOTFOUND' ||
+    code === 'ECONNABORTED' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNRESET' ||
+    msg.includes('temporarily unavailable') ||
+    msg.includes('connection terminated') ||
+    msg.includes('dbhandler')
+  );
+}
+
 function isLikelyTaskText(text = '') {
   const t = String(text || '').toLowerCase();
   if (!t.trim()) return false;
@@ -416,7 +431,16 @@ export async function runWhatsAppGroupScan() {
   console.log(`\n⏰ [${new Date().toISOString()}] OpenClaw Batch Scan — START`);
 
   const { SELECTED_WHATSAPP_GROUPS } = await import('../config/whatsappGroups.js');
-  const tenantRows = await db(`SELECT id FROM tenants`);
+  let tenantRows;
+  try {
+    tenantRows = await db(`SELECT id FROM tenants`);
+  } catch (err) {
+    if (isTemporaryDbError(err)) {
+      console.warn('⚠️ WhatsApp batch scan skipped: temporary DB outage');
+      return [{ status: 'skipped_db_outage' }];
+    }
+    throw err;
+  }
   const results = [];
 
   for (const tenant of tenantRows.rows) {
