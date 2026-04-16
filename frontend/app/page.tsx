@@ -3,16 +3,36 @@
 
 import { useEffect, useState, useCallback, useRef } from 'react';
 
-const API =
-  process.env.NEXT_PUBLIC_API_URL ||
-  (typeof window !== 'undefined'
-    ? `http://${window.location.hostname}:5000`
-    : 'http://localhost:5000');
-const PYTHON_API =
-  process.env.NEXT_PUBLIC_PYTHON_API_URL ||
-  (typeof window !== 'undefined'
-    ? `http://${window.location.hostname}:8000`
-    : 'http://localhost:8000');
+function normalizeBaseUrl(value?: string | null) {
+  return String(value || '').trim().replace(/\/+$/, '');
+}
+
+function isLocalHostname(hostname: string) {
+  return hostname === 'localhost' || hostname === '127.0.0.1';
+}
+
+function resolveApiBaseUrl() {
+  const configured = normalizeBaseUrl(process.env.NEXT_PUBLIC_API_URL);
+  if (configured) return configured;
+  if (typeof window === 'undefined') return 'http://localhost:5000';
+  if (isLocalHostname(window.location.hostname)) {
+    return `http://${window.location.hostname}:5000`;
+  }
+  return normalizeBaseUrl(window.location.origin);
+}
+
+function resolvePythonApiBaseUrl() {
+  const configured = normalizeBaseUrl(process.env.NEXT_PUBLIC_PYTHON_API_URL);
+  if (configured) return configured;
+  if (typeof window === 'undefined') return 'http://localhost:8000';
+  if (isLocalHostname(window.location.hostname)) {
+    return `http://${window.location.hostname}:8000`;
+  }
+  return normalizeBaseUrl(window.location.origin);
+}
+
+const API = resolveApiBaseUrl();
+const PYTHON_API = resolvePythonApiBaseUrl();
 
 if (typeof document !== 'undefined') {
   const style = document.createElement('style');
@@ -137,7 +157,15 @@ const resolveSlack = (id: string, name: string) => SLACK_MAP[id] || SLACK_MAP[na
 const authHeaders = (): HeadersInit => ({});
 
 async function apiFetchJson<T>(input: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(input, init);
+  let response: Response;
+  try {
+    response = await fetch(input, init);
+  } catch (error: any) {
+    if (typeof window !== 'undefined' && !isLocalHostname(window.location.hostname) && !normalizeBaseUrl(process.env.NEXT_PUBLIC_API_URL)) {
+      throw new Error('Live frontend needs NEXT_PUBLIC_API_URL set to your backend URL.');
+    }
+    throw new Error(error?.message || 'Failed to reach API');
+  }
   const payload = await response.json().catch(() => ({}));
   if (!response.ok || payload?.success === false) {
     throw new Error(payload?.error || payload?.message || `HTTP ${response.status}`);

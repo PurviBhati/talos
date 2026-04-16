@@ -58,17 +58,36 @@ function getCorsOrigins() {
     .split(",")
     .map((origin) => origin.trim())
     .filter(Boolean);
-  if (configured.length > 0) return configured;
-  return [
+  const defaults = [
     "http://localhost:3000",
     "http://localhost:3001",
     "http://localhost:3002",
     "http://localhost:3003",
   ];
+  return Array.from(new Set([...defaults, ...configured]));
 }
 
+function isAllowedCorsOrigin(origin, allowedOrigins) {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+  try {
+    const url = new URL(origin);
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") return true;
+    if (url.hostname.endsWith(".vercel.app")) return true;
+  } catch {
+    return false;
+  }
+  return false;
+}
+
+const corsOrigins = getCorsOrigins();
 app.use(cors({
-  origin: getCorsOrigins(),
+  origin(origin, callback) {
+    if (isAllowedCorsOrigin(origin, corsOrigins)) {
+      return callback(null, true);
+    }
+    return callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
   credentials: true,
 }));
 
