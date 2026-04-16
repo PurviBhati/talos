@@ -104,4 +104,16 @@ export function authenticateToken(req, res, next) {
   }
 }
 
+export function authenticateTokenIfPresent(req, _res, next) {
+  const token = req.headers.authorization?.split(" ")[1];
+  if (!token) return next();
+  try {
+    req.user = jwt.verify(token, JWT_SECRET);
+    next();
+  } catch {
+    req.user = null;
+    next();
+  }
+}
+
 export default router;

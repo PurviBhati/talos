@@ -25,18 +25,28 @@ class ConversationStore {
     ]);
   }
 
-  async getAll() {
-    const result = await dbQuery(
-      'SELECT * FROM teams_conversations ORDER BY conversation_name ASC'
-    );
+  async getAll(tenantId = null) {
+    const result = tenantId
+      ? await dbQuery(
+          'SELECT * FROM teams_conversations WHERE tenant_id = $1 ORDER BY conversation_name ASC',
+          [tenantId]
+        )
+      : await dbQuery(
+          'SELECT * FROM teams_conversations ORDER BY conversation_name ASC'
+        );
     return result.rows;
   }
 
-  async getById(conversationId) {
-    const result = await dbQuery(
-      'SELECT * FROM teams_conversations WHERE conversation_id = $1',
-      [conversationId]
-    );
+  async getById(conversationId, tenantId = null) {
+    const result = tenantId
+      ? await dbQuery(
+          'SELECT * FROM teams_conversations WHERE conversation_id = $1 AND tenant_id = $2',
+          [conversationId, tenantId]
+        )
+      : await dbQuery(
+          'SELECT * FROM teams_conversations WHERE conversation_id = $1',
+          [conversationId]
+        );
     return result.rows[0];
   }
 }

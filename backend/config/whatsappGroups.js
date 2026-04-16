@@ -6,7 +6,8 @@ export const SELECTED_WHATSAPP_GROUPS = [
   "Avishkar Branding",
   "Deep Website",
   "Test-grp",
-  "GdI webflow"
+  "GdI webflow",
+  "Website neuramonks"
 ];
 
 // You can modify this list to include only the groups you want to use

@@ -2,14 +2,57 @@ import express from "express";
 import { runAgentAnalysis } from "../agent/openclawAgent.js";
 import { getAccessToken } from "../services/graphservice.js";
 import { query as db } from "../db/index.js";
+import { uploadTeamsFileToSupabase } from "../services/storageService.js";
 //teamsWebhook.js is for handling incoming messages and notifications from Microsoft Graph, while teamsRoutes.js is for handling outgoing messages and group chat management, and teamsApiRoutes.js is for handling API requests related to Teams messages, stats, and forwarding to WhatsApp.
 const router = express.Router();
 
 const MONITORED_CHAT_IDS = (process.env.MONITORED_CHAT_IDS || "").split(",").map(id => id.trim()).filter(Boolean);
+const STRICT_TEAMS_CHAT_FILTER = String(process.env.STRICT_TEAMS_CHAT_FILTER || "true").toLowerCase() !== "false";
+const TEAMS_FILTER_BY_MAPPING = String(process.env.TEAMS_FILTER_BY_MAPPING || "true").toLowerCase() !== "false";
 
 // Bot names to ignore — messages sent by these are our own forwarded messages
 const BOT_NAMES = ["UnifiedHub-Bot", "unifiedhub-bot", "OpenClaw", "openclaw"];
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || "tenant-default";
+const TEAMS_OUTBOUND_DISABLED = String(process.env.DISABLE_TEAMS_TO_OTHER_FORWARDING || 'true').toLowerCase() !== 'false';
+const GRAPH_WEBHOOK_CLIENT_STATE = String(process.env.GRAPH_WEBHOOK_CLIENT_STATE || '').trim();
+
+async function getAllowedTeamsChatIds(tenantId = DEFAULT_TENANT_ID) {
+  const ids = new Set();
+  if (!TEAMS_FILTER_BY_MAPPING) {
+    MONITORED_CHAT_IDS.forEach((id) => ids.add(id));
+    return ids;
+  }
+  try {
+    const mapped = await db(
+      `SELECT teams_chat_id
+       FROM channel_mappings
+       WHERE tenant_id = $1
+         AND active = true
+         AND teams_chat_id IS NOT NULL
+         AND teams_chat_id != ''
+         AND (
+           (whatsapp_group_name IS NOT NULL AND whatsapp_group_name != '')
+           OR (
+             slack_channel_id IS NOT NULL
+             AND slack_channel_id != ''
+             AND LOWER(slack_channel_id) != 'none'
+           )
+         )`,
+      [tenantId]
+    );
+    for (const row of mapped.rows) {
+      const id = String(row.teams_chat_id || "").trim();
+      if (id) ids.add(id);
+    }
+  } catch (err) {
+    console.warn(`⚠️ Failed to load mapped Teams chat ids: ${err.message}`);
+  }
+  if (ids.size === 0 && MONITORED_CHAT_IDS.length > 0) {
+    console.warn("⚠️ No active mapped Teams chats found; falling back to MONITORED_CHAT_IDS");
+    MONITORED_CHAT_IDS.forEach((id) => ids.add(id));
+  }
+  return ids;
+}
 
 // ─── GET: Handle Microsoft validation token ───────────────────────────────────
 router.get("/webhook", (req, res) => {
@@ -30,7 +73,20 @@ router.post("/webhook", async (req, res) => {
   const notifications = req.body?.value || [];
   console.log(`📨 Received ${notifications.length} notification(s)`);
 
+  if (GRAPH_WEBHOOK_CLIENT_STATE) {
+    const invalid = notifications.some((notification) => notification?.clientState !== GRAPH_WEBHOOK_CLIENT_STATE);
+    if (invalid) {
+      console.warn("⛔ Rejected Teams webhook with invalid clientState");
+      return res.sendStatus(403);
+    }
+  }
+
   res.sendStatus(202);
+  const tenantId = req.tenantId || DEFAULT_TENANT_ID;
+  const allowedChatIds = await getAllowedTeamsChatIds(tenantId);
+  if (STRICT_TEAMS_CHAT_FILTER && allowedChatIds.size === 0) {
+    console.warn("⛔ Strict Teams filter enabled and no allowed chat ids configured. Skipping all incoming Teams messages.");
+  }
 
   for (const notification of notifications) {
     const resource = notification.resource;
@@ -99,7 +155,7 @@ router.post("/webhook", async (req, res) => {
       let chatName = "Group Chat";
       let files = [];
 
-      // Handle "done" replies first, even if chat is not in MONITORED_CHAT_IDS.
+      // Handle "done" replies first, even if chat is not in allowed chat ids.
       if (isDoneReply) {
         try {
           const doneBy = sender || "unknown";
@@ -112,7 +168,7 @@ router.post("/webhook", async (req, res) => {
                AND teams_activity_id = $2
                AND status <> 'done'
              RETURNING id`,
-            [DEFAULT_TENANT_ID, replyToId, doneBy]
+            [tenantId, replyToId, doneBy]
           );
           if (updated.rows.length > 0) {
             console.log(`✅ Task marked done via Teams webhook replyToId=${replyToId} taskId=${updated.rows[0].id}`);
@@ -125,19 +181,10 @@ router.post("/webhook", async (req, res) => {
         continue;
       }
 
-      // ─── 2-Way Communication Logic ─────────────────────────────────────────
-      // If the message starts with "#slack" or "#wa", route it directly
-      if (normalizedText.startsWith("#slack") || normalizedText.startsWith("#wa")) {
-        console.log(`🔀 2-Way Command detected: ${cleanText}`);
-        const { handle2WayCommand } = await import('../services/twoWayService.js');
-        await handle2WayCommand({
-          sender,
-          body: cleanText,
-          sourceId,
-          chatName,
-          files
-        }).catch(err => console.error("❌ 2-Way Command error:", err.message));
-        continue; // Skip normal analysis for manual commands
+      // One-way mode: ignore Teams-origin manual routing commands.
+      if (TEAMS_OUTBOUND_DISABLED && (normalizedText.startsWith("#slack") || normalizedText.startsWith("#wa"))) {
+        console.log(`⏭️ Ignoring Teams outbound command in one-way mode: ${cleanText}`);
+        continue;
       }
 
       // ✅ Only process chat messages, skip channels
@@ -149,11 +196,14 @@ router.post("/webhook", async (req, res) => {
       
       console.log(`📨 Received notification for message from ${sender} in chat ${sourceId}`);
 
-      // ✅ Check monitored chats
-      if (MONITORED_CHAT_IDS.length > 0 && !MONITORED_CHAT_IDS.includes(sourceId)) {
+      // ✅ Strict chat allowlist check (MONITORED_CHAT_IDS + active channel_mappings.teams_chat_id)
+      if (STRICT_TEAMS_CHAT_FILTER && !allowedChatIds.has(sourceId)) {
+        console.log(`⛔ Skipping unapproved Teams chat: ${sourceId}`);
         continue;
       }
-      console.log(`✅ Monitored chat matched: ${sourceId}`);
+      if (allowedChatIds.size > 0) {
+        console.log(`✅ Allowed Teams chat matched: ${sourceId}`);
+      }
 
       // ─── Extract files from attachments ──────────────────────────────────
       files = (message.attachments || [])
@@ -170,6 +220,23 @@ router.post("/webhook", async (req, res) => {
         }))
         .filter(f => f.url);
 
+      for (const file of files) {
+        try {
+          const publicUrl = await uploadTeamsFileToSupabase(
+            file.url,
+            file.name || 'attachment',
+            sourceId,
+            graphMessageId,
+            token
+          );
+          if (publicUrl) {
+            file.publicUrl = publicUrl;
+          }
+        } catch (uploadErr) {
+          console.warn(`⚠️ Teams attachment upload skipped for ${file.name}: ${uploadErr.message}`);
+        }
+      }
+
       // ─── Fetch inline hosted content images ──────────────────────────────
       try {
         const hostedRes = await fetch(
@@ -180,9 +247,23 @@ router.post("/webhook", async (req, res) => {
         const hostedItems = hostedData.value || [];
         console.log(`🖼️ Hosted contents: ${hostedItems.length}`);
         for (const item of hostedItems) {
+          const graphUrl = `https://graph.microsoft.com/v1.0/chats/${sourceId}/messages/${graphMessageId}/hostedContents/${item.id}/$value`;
+          let publicUrl = null;
+          try {
+            publicUrl = await uploadTeamsFileToSupabase(
+              graphUrl,
+              `image_${item.id}.jpg`,
+              sourceId,
+              graphMessageId,
+              token
+            );
+          } catch (hostedUploadErr) {
+            console.warn(`⚠️ Hosted content upload skipped for ${item.id}: ${hostedUploadErr.message}`);
+          }
           files.push({
             name: `image_${item.id}.jpg`,
-            url: `https://graph.microsoft.com/v1.0/chats/${sourceId}/messages/${graphMessageId}/hostedContents/${item.id}/$value`,
+            url: graphUrl,
+            publicUrl,
             contentType: item.contentType || 'image/jpeg',
             hostedContentId: item.id
           });
@@ -200,10 +281,13 @@ router.post("/webhook", async (req, res) => {
       // ✅ Duplicate check
       const dupCheck = await db(
         `SELECT id FROM teams_messages 
-         WHERE message_id = $1 
-         OR (sender = $2 AND body = $3 AND ABS(EXTRACT(EPOCH FROM (timestamp - $4::timestamptz))) < 10)
+         WHERE tenant_id = $1
+           AND (
+             message_id = $2 
+             OR (sender = $3 AND body = $4 AND ABS(EXTRACT(EPOCH FROM (timestamp - $5::timestamptz))) < 10)
+           )
          LIMIT 1`,
-        [graphMessageId, sender, body, timestamp]
+        [tenantId, graphMessageId, sender, body, timestamp]
       );
       if (dupCheck.rows.length > 0) {
         console.log(`⏭️ Duplicate skipped: ${graphMessageId}`);
@@ -258,21 +342,33 @@ router.post("/webhook", async (req, res) => {
                         lowerBody.includes("ignore this") || 
                         lowerBody.includes("ignore these task");
 
-      const tenantId = req.tenantId || DEFAULT_TENANT_ID;
-      const insertResult = await db(
-        `INSERT INTO teams_messages 
-          (tenant_id, message_id, sender, body, timestamp, message_type, files, links, source_id, source_type, chat_name, approval_status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-         RETURNING id`,
-        [
-          tenantId, graphMessageId, sender, body, timestamp, messageType,
-          JSON.stringify(files), JSON.stringify(links),
-          sourceId, "groupChat", chatName,
-          isIgnored ? 'ignored' : 'waiting'
-        ]
-      );
+      let insertResult;
+      try {
+        insertResult = await db(
+          `INSERT INTO teams_messages 
+            (tenant_id, message_id, sender, body, timestamp, message_type, files, links, source_id, source_type, chat_name, approval_status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+           RETURNING id`,
+          [
+            tenantId, graphMessageId, sender, body, timestamp, messageType,
+            JSON.stringify(files), JSON.stringify(links),
+            sourceId, "groupChat", chatName,
+            isIgnored ? 'ignored' : 'waiting'
+          ]
+        );
+      } catch (insertErr) {
+        if (insertErr?.code === '23505') {
+          console.log(`⏭️ Duplicate skipped after insert conflict: ${graphMessageId}`);
+          continue;
+        }
+        throw insertErr;
+      }
 
       const savedId = insertResult.rows[0]?.id;
+      if (!savedId) {
+        console.log(`⏭️ Duplicate skipped after upsert race: ${graphMessageId}`);
+        continue;
+      }
       console.log(`💾 Saved message from ${sender} (id: ${savedId}): "${cleanText.slice(0, 60)}" ${isIgnored ? '(AUTO-IGNORED)' : ''}`);
 
       // ✅ Run OpenClaw analysis for text and image-only messages
@@ -290,11 +386,10 @@ router.post("/webhook", async (req, res) => {
         }).catch(err => console.error("OpenClaw Teams analysis error:", err.message));
       }
 
-      // ✅ Forward images/files to WhatsApp & Slack via Supabase Storage
-      // AFTER
-      if (files.length > 0) {
+      // One-way mode: never auto-forward Teams-origin files/messages to other platforms.
+      if (!TEAMS_OUTBOUND_DISABLED && files.length > 0) {
         const { forwardTeamsFilesToWhatsApp } = await import('../services/imageForwardService.js');
-          forwardTeamsFilesToWhatsApp(savedId, files, sender, cleanText)
+        forwardTeamsFilesToWhatsApp(savedId, files, sender, cleanText)
           .catch(err => console.error('Image forward error:', err.message));
       }
 

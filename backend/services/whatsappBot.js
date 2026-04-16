@@ -5,6 +5,7 @@ import { query as db } from '../db/index.js';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import { isMutedSenderForGroup } from '../utils/whatsappMute.js';
 //whatsappBot.js
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,21 +13,127 @@ const __dirname = path.dirname(__filename);
 const { Client, LocalAuth, MessageMedia } = pkg;
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || "tenant-default";
 
-function normalizeName(value = '') {
-  return String(value || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+function getJinaHeaders() {
+  const key = String(process.env.JINA_API_KEY || '').trim();
+  if (!key) return {};
+  return { Authorization: `Bearer ${key}` };
 }
 
-function isMutedSenderForGroup(senderName = '', groupName = '') {
-  const senderNorm = normalizeName(senderName);
-  const groupNorm = normalizeName(groupName);
+function toJinaReaderUrl(rawUrl = '') {
+  const clean = String(rawUrl || '').trim();
+  if (!/^https?:\/\//i.test(clean)) return null;
+  return `https://r.jina.ai/${clean}`;
+}
 
-  // Requested mute: only this person in this group.
-  const isTargetGroup = groupNorm.includes('deepgrp') || groupNorm.includes('deepwebsite');
-  const isTargetSender =
-    senderNorm === 'mayurbhaia' ||
-    senderNorm.includes('mayurbhaia');
+async function readUrlWithJina(rawUrl) {
+  const jinaUrl = toJinaReaderUrl(rawUrl);
+  if (!jinaUrl) return null;
 
-  return isTargetGroup && isTargetSender;
+  try {
+    const res = await fetch(jinaUrl, {
+      method: 'GET',
+      headers: getJinaHeaders(),
+      signal: AbortSignal.timeout(Number(process.env.JINA_TIMEOUT_MS || 8000)),
+    });
+    if (!res.ok) {
+      console.warn(`⚠️ Jina read failed (${res.status}) for ${rawUrl}`);
+      return null;
+    }
+
+    const text = await res.text();
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return null;
+    return normalized.slice(0, Number(process.env.JINA_MAX_CHARS || 2000));
+  } catch (err) {
+    console.warn(`⚠️ Jina read error for ${rawUrl}: ${err.message}`);
+    return null;
+  }
+}
+
+async function readLinksWithJina(links = []) {
+  const unique = [...new Set((links || []).map((u) => String(u || '').trim()).filter(Boolean))];
+  if (!unique.length) return [];
+
+  const maxLinks = Number(process.env.JINA_MAX_LINKS_PER_MESSAGE || 2);
+  const picked = unique.slice(0, maxLinks);
+  const results = await Promise.allSettled(picked.map((url) => readUrlWithJina(url)));
+  const reads = [];
+
+  picked.forEach((url, idx) => {
+    const item = results[idx];
+    if (item.status !== 'fulfilled' || !item.value) return;
+    reads.push({ url, content: item.value });
+  });
+
+  return reads;
+}
+
+function buildJinaContextBlock(reads = []) {
+  if (!Array.isArray(reads) || reads.length === 0) return '';
+  const contextLines = reads.map((item) => `URL: ${item.url}\nContent: ${item.content}`);
+  return `\n\n[URL_CONTEXT_FROM_JINA]\n${contextLines.join('\n\n')}\n[/URL_CONTEXT_FROM_JINA]`;
+}
+
+async function saveLinkReads({
+  tenantId = DEFAULT_TENANT_ID,
+  source = 'whatsapp',
+  sourceMessageId = null,
+  platformLabel = null,
+  sender = null,
+  senderHandle = null,
+  commentBody = '',
+  reads = [],
+}) {
+  if (!Array.isArray(reads) || reads.length === 0) return;
+
+  for (const item of reads) {
+    if (!item?.url || !item?.content) continue;
+    try {
+      try {
+        await db(
+          `INSERT INTO link_reads
+            (tenant_id, source, source_message_id, platform_label, sender, sender_handle, comment_body, url, read_content)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          [
+            tenantId,
+            source,
+            sourceMessageId,
+            platformLabel,
+            sender,
+            senderHandle,
+            commentBody || '',
+            item.url,
+            item.content,
+          ]
+        );
+      } catch (insertErr) {
+        if (insertErr?.code === '23505') {
+          await db(
+            `UPDATE link_reads
+             SET comment_body = $1,
+                 read_content = $2,
+                 created_at = NOW()
+             WHERE tenant_id = $3
+               AND source = $4
+               AND source_message_id = $5
+               AND url = $6`,
+            [
+              commentBody || '',
+              item.content,
+              tenantId,
+              source,
+              sourceMessageId,
+              item.url,
+            ]
+          );
+        } else {
+          throw insertErr;
+        }
+      }
+    } catch (err) {
+      console.warn(`⚠️ Failed to save link read for ${item.url}: ${err.message}`);
+    }
+  }
 }
 
 class WhatsAppBot {
@@ -186,6 +293,7 @@ class WhatsAppBot {
 
         const contact = await message.getContact().catch(() => null);
         const senderName = contact?.pushname || contact?.name || 'Unknown';
+        const senderHandle = (message.author || message.from || '').trim();
 
         console.log(`📱 WhatsApp: ${senderName} in "${groupName}"`);
 
@@ -249,13 +357,13 @@ class WhatsAppBot {
             (tenant_id, sender, sender_phone, body, timestamp, media_urls, direction, group_name)
            VALUES ($1, $2, $3, $4, $5, $6, 'inbound', $7)
            RETURNING id`,
-          [DEFAULT_TENANT_ID, senderName, message.from, message.body || '', new Date().toISOString(), JSON.stringify(mediaUrls), groupName]
+          [DEFAULT_TENANT_ID, senderName, senderHandle || message.from, message.body || '', new Date().toISOString(), JSON.stringify(mediaUrls), groupName]
         );
 
         const messageId = result.rows[0]?.id;
         console.log(`💾 Saved WhatsApp message (id: ${messageId}) [inbound]`);
 
-        const mutedSender = isMutedSenderForGroup(senderName, groupName);
+        const mutedSender = isMutedSenderForGroup(senderName, groupName, senderHandle);
         if (mutedSender && messageId) {
           await db(
             `UPDATE whatsapp_messages
@@ -280,6 +388,27 @@ class WhatsAppBot {
 
         // ─── Task detection ───────────────────────────────────────────
         const links = (message.body || '').match(/https?:\/\/[^\s<>"{}|\\^`\[\]]+/g) || [];
+        let enrichedBody = message.body || '';
+        let jinaReads = [];
+        if (links.length > 0) {
+          jinaReads = await readLinksWithJina(links);
+          const jinaContext = buildJinaContextBlock(jinaReads);
+          if (jinaContext) {
+            enrichedBody = `${enrichedBody}${jinaContext}`;
+          }
+        }
+        if (jinaReads.length > 0) {
+          await saveLinkReads({
+            tenantId: DEFAULT_TENANT_ID,
+            source: 'whatsapp',
+            sourceMessageId: messageId,
+            platformLabel: groupName,
+            sender: senderName,
+            senderHandle: senderHandle || message.from,
+            commentBody: message.body || '',
+            reads: jinaReads,
+          });
+        }
         if ((links.length > 0 || mediaUrls.length > 0) && SELECTED_WHATSAPP_GROUPS.includes(groupName)) {
           fetch(`http://localhost:${process.env.PORT || 5000}/api/tasks/detect`, {
             method: 'POST',
@@ -289,7 +418,7 @@ class WhatsAppBot {
               source_message_id: messageId,
               client_name: senderName,
               platform_label: groupName,
-              body: message.body || '',
+              body: enrichedBody,
               images: mediaUrls,
             }),
           }).catch(() => {});
@@ -301,7 +430,7 @@ class WhatsAppBot {
           runAgentAnalysis({
             source: 'whatsapp',
             sender: senderName,
-            content: (message.body && message.body.trim()) ? message.body : '[media-only message]',
+            content: (enrichedBody && enrichedBody.trim()) ? enrichedBody : '[media-only message]',
             messageId,
             mediaUrls,
           }).catch(err => console.error('OpenClaw error:', err.message));

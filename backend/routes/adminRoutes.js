@@ -2,16 +2,51 @@ import express from "express";
 import { query } from "../db/index.js";
 import { getAccessToken } from "../services/graphservice.js";
 import { sendSlackMessage, sendSlackMessageWithFiles } from "../services/sendSlack.js";
-import { authenticateToken } from "./authRoutes.js";
 import { approveDraft } from "../agent/tools/approveDraft.js";
 import { getTeamsStatus } from "../services/teamsSubscription.js";
 import whatsappBot from "../services/whatsappBot.js";
 import { SELECTED_WHATSAPP_GROUPS } from "../config/whatsappGroups.js";
 import { requireTenant } from "../middleware/tenantContext.js";
+import { fail, ok } from "../utils/apiResponse.js";
 
 // adminRoute.js file
 const router = express.Router();
 router.use(requireTenant);
+const TEAMS_FILTER_BY_MAPPING = String(process.env.TEAMS_FILTER_BY_MAPPING || "true").toLowerCase() !== "false";
+const draftsCache = new Map();
+const DRAFTS_CACHE_TTL_MS = Number(process.env.DRAFTS_CACHE_TTL_MS || 15000);
+
+async function getAllowedTeamsChatIds(tenantId) {
+  const monitored = (process.env.MONITORED_CHAT_IDS || "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean);
+  if (!TEAMS_FILTER_BY_MAPPING) return monitored;
+  try {
+    const mapped = await query(
+      `SELECT teams_chat_id
+       FROM channel_mappings
+       WHERE tenant_id = $1
+         AND active = true
+         AND teams_chat_id IS NOT NULL
+         AND teams_chat_id != ''
+         AND (
+           (whatsapp_group_name IS NOT NULL AND whatsapp_group_name != '')
+           OR (
+             slack_channel_id IS NOT NULL
+             AND slack_channel_id != ''
+             AND LOWER(slack_channel_id) != 'none'
+           )
+         )`,
+      [tenantId]
+    );
+    const ids = mapped.rows.map((r) => String(r.teams_chat_id || "").trim()).filter(Boolean);
+    if (ids.length > 0) return ids;
+  } catch (err) {
+    console.warn(`⚠️ Failed to load mapped Teams chat ids for drafts filter: ${err.message}`);
+  }
+  return monitored;
+}
 
 // ─── GET /api/messages/health ────────────────────────────────────────────────
 router.get("/health", async (req, res) => {
@@ -41,7 +76,7 @@ router.get("/health", async (req, res) => {
       monitoredChats: (process.env.MONITORED_CHAT_IDS || "").split(",").filter(Boolean).length
     };
 
-    res.json({
+    return ok(res, {
       status: "online",
       db: dbStatus,
       teams: teamsStatus,
@@ -50,7 +85,7 @@ router.get("/health", async (req, res) => {
       timestamp: new Date()
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return fail(res, 500, err.message);
   }
 });
 
@@ -58,12 +93,25 @@ router.get("/health", async (req, res) => {
 router.get("/drafts", async (req, res) => {
   try {
     const tenantId = req.tenantId;
+    const cacheKey = `${tenantId || 'default'}:drafts`;
+    const cached = draftsCache.get(cacheKey);
+    if (cached && (Date.now() - cached.at) < DRAFTS_CACHE_TTL_MS) {
+      return ok(res, cached.rows);
+    }
     const now = new Date();
     const isMonday = now.getDay() === 1;
+    const allowedTeamsChatIds = await getAllowedTeamsChatIds(tenantId);
+    if (allowedTeamsChatIds.length === 0) {
+      console.warn("⛔ No allowed Teams chats for drafts; returning empty list");
+      return ok(res, []);
+    }
     
     // Today's drafts or last 4 from Friday if Monday
     const draftsSQL = `
-      WITH all_drafts AS (
+      WITH tz AS (
+        SELECT (NOW() AT TIME ZONE 'Asia/Kolkata')::date AS today_ist
+      ),
+      all_drafts AS (
         SELECT 
           id, sender, 'teams'::text as source_type,
           COALESCE(approved_draft, body) AS content,
@@ -85,30 +133,31 @@ router.get("/drafts", async (req, res) => {
           '[]' AS attachments
         FROM teams_messages
         WHERE tenant_id = $2
+          AND source_id = ANY($3)
           AND approval_status IS DISTINCT FROM 'ignored'
           AND approval_status IS DISTINCT FROM 'forwarded'
           AND (
             -- Today's messages
-            (timestamp AT TIME ZONE 'Asia/Kolkata')::date = CURRENT_DATE
+            (timestamp AT TIME ZONE 'Asia/Kolkata')::date = (SELECT today_ist FROM tz)
             OR 
             -- Last Friday's messages if today is Monday
             (
               $1 = TRUE 
-              AND (timestamp AT TIME ZONE 'Asia/Kolkata')::date = CURRENT_DATE - INTERVAL '3 days'
+              AND (timestamp AT TIME ZONE 'Asia/Kolkata')::date = (SELECT today_ist FROM tz) - INTERVAL '3 days'
             )
           )
         ORDER BY created_at DESC
       )
       SELECT * FROM all_drafts
-      LIMIT CASE WHEN (SELECT count(*) FROM all_drafts WHERE (created_at AT TIME ZONE 'Asia/Kolkata')::date = CURRENT_DATE) > 0 THEN 20 ELSE 4 END
+      LIMIT CASE WHEN (SELECT count(*) FROM all_drafts WHERE (created_at AT TIME ZONE 'Asia/Kolkata')::date = (SELECT today_ist FROM tz)) > 0 THEN 20 ELSE 4 END
     `;
 
-    const result = await query(draftsSQL, [isMonday, tenantId]);
-    console.log(`📊 AI Drafts: ${result.rows.length} total (last 2 days)`);
-    return res.status(200).json(result.rows);
+    const result = await query(draftsSQL, [isMonday, tenantId, allowedTeamsChatIds]);
+    draftsCache.set(cacheKey, { at: Date.now(), rows: result.rows });
+    return ok(res, result.rows);
   } catch (error) {
     console.error("Fetch unified drafts error:", error);
-    return res.status(500).json({ error: "Failed to fetch drafts", details: error.message });
+    return fail(res, 500, "Failed to fetch drafts", { details: error.message });
   }
 });
 
@@ -120,27 +169,23 @@ router.post("/approve/:id", async (req, res) => {
     const { platform, editedContent, slackChannel, whatsappNumber, whatsappGroup, source_type } = req.body;
     console.log("📨 Approve request - ID:", id, "| platform:", platform, "| source:", source_type);
 
-    if (!id || isNaN(id)) return res.status(400).json({ error: "Valid ID is required" });
+    if (!id || isNaN(id)) return fail(res, 400, "Valid ID is required");
 
     let msg, finalContent;
 
     if (source_type === 'whatsapp') {
       const msgResult = await query("SELECT * FROM whatsapp_messages WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
-      if (!msgResult.rows.length) return res.status(404).json({ error: "WhatsApp message not found" });
+      if (!msgResult.rows.length) return fail(res, 404, "WhatsApp message not found");
       msg = msgResult.rows[0];
       finalContent = editedContent || msg.body;
-      await query(`UPDATE whatsapp_messages SET forwarded_to_teams = true WHERE id = $1 AND tenant_id = $2`, [id, tenantId]);
+      if (msg.forwarded_to_teams) {
+        return ok(res, { sent: true, duplicate: true, platform, source_type: 'whatsapp' }, { message: "Already forwarded" });
+      }
     } else {
       const msgResult = await query("SELECT *, files::text as files_text FROM teams_messages WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
-      if (!msgResult.rows.length) return res.status(404).json({ error: "Teams message not found" });
+      if (!msgResult.rows.length) return fail(res, 404, "Teams message not found");
       msg = msgResult.rows[0];
       finalContent = editedContent || msg.approved_draft || msg.body;
-      await query(
-        `UPDATE teams_messages
-         SET approval_status = 'approved', suggested_platform = $2, approved_draft = $3
-         WHERE id = $1 AND tenant_id = $4`,
-        [id, platform || "slack", finalContent, tenantId]
-      );
     }
 
     const cleanContent = finalContent.replace(/<[^>]*>/g, "").replace(/&nbsp;/g, " ").trim();
@@ -219,10 +264,28 @@ router.post("/approve/:id", async (req, res) => {
       }
     }
 
-    return res.status(200).json({ message: "Approved", sent: !!sendResult, sendError, platform, source_type: source_type || 'teams' });
+    if (sendError || !sendResult) {
+      return fail(res, 502, "Approval send failed", {
+        details: sendError || "No delivery result",
+        meta: { platform, source_type: source_type || 'teams', sent: false },
+      });
+    }
+
+    if (source_type === 'whatsapp') {
+      await query(`UPDATE whatsapp_messages SET forwarded_to_teams = true WHERE id = $1 AND tenant_id = $2`, [id, tenantId]);
+    } else {
+      await query(
+        `UPDATE teams_messages
+         SET approval_status = 'approved', suggested_platform = $2, approved_draft = $3
+         WHERE id = $1 AND tenant_id = $4`,
+        [id, platform || "slack", finalContent, tenantId]
+      );
+    }
+
+    return ok(res, { sent: true, platform, source_type: source_type || 'teams' }, { message: "Approved" });
   } catch (error) {
     console.error("Approve error:", error);
-    return res.status(500).json({ error: "Approval failed", details: error.message });
+    return fail(res, 500, "Approval failed", { details: error.message });
   }
 });
 
@@ -231,46 +294,47 @@ router.post("/ignore/:id", async (req, res) => {
   try {
     const tenantId = req.tenantId;
     const id = parseInt(req.params.id);
-    if (!id || isNaN(id)) return res.status(400).json({ error: "Valid ID is required" });
+    if (!id || isNaN(id)) return fail(res, 400, "Valid ID is required");
     await query("UPDATE teams_messages SET approval_status = 'ignored' WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
-    return res.status(200).json({ message: "Ignored" });
+    return ok(res, { id, ignored: true }, { message: "Ignored" });
   } catch (error) {
-    return res.status(500).json({ error: error.message });
+    return fail(res, 500, error.message);
   }
 });
 
 // ─── GET /api/messages/contacts ───────────────────────────────────────────────
 router.get("/contacts", async (req, res) => {
   try {
-    const result = await query("SELECT * FROM contacts ORDER BY name");
-    res.json(result.rows);
+    const result = await query("SELECT * FROM contacts WHERE tenant_id = $1 ORDER BY name", [req.tenantId]);
+    return ok(res, result.rows);
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return fail(res, 500, err.message);
   }
 });
 
 // ─── POST /api/messages/contacts ─────────────────────────────────────────────
-router.post("/contacts", authenticateToken, async (req, res) => {
+router.post("/contacts", async (req, res) => {
   try {
     const { name, email, slack_user_id, slack_channel, whatsapp_number, notes } = req.body;
+    if (!name || !String(name).trim()) return fail(res, 400, "name is required");
     const result = await query(
-      `INSERT INTO contacts (name, email, slack_user_id, slack_channel, whatsapp_number, notes)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [name, email || null, slack_user_id || null, slack_channel || null, whatsapp_number || null, notes || null]
+      `INSERT INTO contacts (tenant_id, name, email, slack_user_id, slack_channel, whatsapp_number, notes)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
+      [req.tenantId, name, email || null, slack_user_id || null, slack_channel || null, whatsapp_number || null, notes || null]
     );
-    res.status(201).json(result.rows[0]);
+    return ok(res, result.rows[0], { status: 201 });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return fail(res, 500, err.message);
   }
 });
 
 // ─── DELETE /api/messages/contacts/:id ───────────────────────────────────────
 router.delete("/contacts/:id", async (req, res) => {
   try {
-    await query("DELETE FROM contacts WHERE id = $1", [req.params.id]);
-    res.json({ message: "Deleted" });
+    await query("DELETE FROM contacts WHERE id = $1 AND tenant_id = $2", [req.params.id, req.tenantId]);
+    return ok(res, { deleted: true }, { message: "Deleted" });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    return fail(res, 500, err.message);
   }
 });
 
@@ -289,9 +353,9 @@ router.get("/whatsapp-groups", async (req, res) => {
       id: name, name,
       participants: result.rows.find(r => r.name === name)?.message_count || 0
     }));
-    res.json(groups);
+    return ok(res, groups);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return fail(res, 500, error.message);
   }
 });
 
@@ -302,14 +366,14 @@ router.get("/teams/list", async (req, res) => {
     const response = await fetch("https://graph.microsoft.com/beta/teams", {
       headers: { Authorization: `Bearer ${token}` },
     });
-    res.json(await response.json());
+    return ok(res, await response.json());
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    return fail(res, 500, error.message);
   }
 });
 
 // ─── POST /api/messages/drafts/:id/approve ───────────────────────────────────
-router.post("/drafts/:id/approve", authenticateToken, async (req, res) => {
+router.post("/drafts/:id/approve", async (req, res) => {
   try {
     const draftId = parseInt(req.params.id);
     if (!draftId || isNaN(draftId)) return res.status(400).json({ error: "Valid draft ID is required" });

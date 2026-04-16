@@ -35,6 +35,7 @@ import summaryRoutes from "./routes/summaryRoutes.js";
 import forwardLogRoutes from './routes/forwardLogRoutes.js';
 import scanRoutes from './routes/scanRoutes.js';
 import settingsRoutes from "./routes/settingsRoutes.js";
+import linkReadsRoutes from "./routes/linkReadsRoutes.js";
 import { startWhatsAppGroupTracker, stopWhatsAppGroupTracker } from './services/whatsappGroupTracker.js';
 import { startSlackBatchScanner, stopSlackBatchScanner } from './services/slackBatchScanner.js';
 import { startRetryService, stopRetryService } from './services/retryForwards.js';
@@ -111,6 +112,7 @@ app.use("/api/summaries", summaryRoutes);
 app.use('/api/forward-logs', forwardLogRoutes);
 app.use('/api/scan', scanRoutes);
 app.use("/api/slack-batch", slackRoutes);
+app.use("/api/link-reads", linkReadsRoutes);
 
 // ─── Link Preview API ────────────────────────────────────────────────────────
 app.get("/api/link-preview", async (req, res) => {
@@ -259,6 +261,21 @@ async function runMigrations() {
         updated_at TIMESTAMPTZ DEFAULT NOW()
       )
     `);
+    await query(`
+      CREATE TABLE IF NOT EXISTS link_reads (
+        id SERIAL PRIMARY KEY,
+        tenant_id TEXT NOT NULL DEFAULT 'tenant-default',
+        source TEXT NOT NULL,
+        source_message_id INTEGER,
+        platform_label TEXT,
+        sender TEXT,
+        sender_handle TEXT,
+        comment_body TEXT,
+        url TEXT NOT NULL,
+        read_content TEXT,
+        created_at TIMESTAMPTZ DEFAULT NOW()
+      )
+    `);
 
     const tenantTables = [
       "users",
@@ -272,6 +289,7 @@ async function runMigrations() {
       "client_history",
       "whatsapp_batch_tasks",
       "slack_threads",
+      "link_reads",
     ];
     for (const table of tenantTables) {
       await query(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS tenant_id TEXT`);
@@ -304,6 +322,46 @@ async function runMigrations() {
     await query(`CREATE INDEX IF NOT EXISTS idx_client_history_tenant_source_group ON client_history(tenant_id, source, group_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_whatsapp_batch_tasks_tenant_id ON whatsapp_batch_tasks(tenant_id)`);
     await query(`CREATE INDEX IF NOT EXISTS idx_slack_threads_tenant_id ON slack_threads(tenant_id)`);
+    await query(`CREATE INDEX IF NOT EXISTS idx_link_reads_tenant_created ON link_reads(tenant_id, created_at DESC)`);
+    await query(`
+      DELETE FROM teams_messages a
+      USING teams_messages b
+      WHERE a.id < b.id
+        AND a.tenant_id = b.tenant_id
+        AND a.message_id IS NOT NULL
+        AND a.message_id = b.message_id
+    `);
+    await query(`
+      DELETE FROM whatsapp_messages a
+      USING whatsapp_messages b
+      WHERE a.id < b.id
+        AND a.tenant_id = b.tenant_id
+        AND a.message_sid IS NOT NULL
+        AND a.message_sid = b.message_sid
+    `);
+    await query(`
+      DELETE FROM link_reads a
+      USING link_reads b
+      WHERE a.id < b.id
+        AND a.tenant_id = b.tenant_id
+        AND a.source = b.source
+        AND a.source_message_id IS NOT NULL
+        AND a.source_message_id = b.source_message_id
+        AND a.url = b.url
+    `);
+    await query(`
+      DELETE FROM tasks a
+      USING tasks b
+      WHERE a.id < b.id
+        AND a.tenant_id = b.tenant_id
+        AND a.source = b.source
+        AND a.source_message_id IS NOT NULL
+        AND a.source_message_id = b.source_message_id
+    `);
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_teams_messages_tenant_message_id_unique ON teams_messages(tenant_id, message_id) WHERE message_id IS NOT NULL`);
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_whatsapp_messages_tenant_sid_unique ON whatsapp_messages(tenant_id, message_sid) WHERE message_sid IS NOT NULL`);
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_link_reads_tenant_source_message_url_unique ON link_reads(tenant_id, source, source_message_id, url) WHERE source_message_id IS NOT NULL`);
+    await query(`CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_tenant_source_message_unique ON tasks(tenant_id, source, source_message_id) WHERE source_message_id IS NOT NULL`);
     await query(`
       CREATE TABLE IF NOT EXISTS system_settings (
         id SERIAL PRIMARY KEY,

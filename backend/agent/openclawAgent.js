@@ -9,6 +9,7 @@ import { logForward } from "../services/forwardLogger.js";
 import { hasBlockedForwardContent, isForwardEligibleCategory } from "../utils/forwardPolicy.js";
 import { getOpenAIClient, getOpenAIModel } from "../services/runtimeAiConfig.js";
 const MIN_FORWARD_CONFIDENCE = Math.min(1, Math.max(0, Number(process.env.MIN_FORWARD_CONFIDENCE || 0.62)));
+const TEAMS_OUTBOUND_DISABLED = String(process.env.DISABLE_TEAMS_TO_OTHER_FORWARDING || 'true').toLowerCase() !== 'false';
 
 
 // ─── ANALYSIS CACHE (10 min TTL) ─────────────────────────────────────────────
@@ -121,7 +122,8 @@ async function classifyMessage({
 }) {
   const lowerContent = (content || '').toLowerCase().trim();
   const isLikelyApproval = lowerContent.length < 30 && !lowerContent.includes('http');
-  const hasVisionInput = Array.isArray(mediaUrls) && mediaUrls.length > 0;
+  const normalizedMediaUrls = [...new Set((Array.isArray(mediaUrls) ? mediaUrls : []).filter(Boolean))].slice(0, 2);
+  const hasVisionInput = normalizedMediaUrls.length > 0;
 
   if (!isLikelyApproval && !hasVisionInput) {
     const cached = getCachedAnalysis(content);
@@ -177,8 +179,8 @@ If nothing qualifies, set should_forward false and category "irrelevant" or "gen
     { type: "text", text: `Platform: ${source.toUpperCase()}\nSender: ${senderName}\n${groupContext}\nHas files: ${hasFiles}\nHas links: ${hasLinks}\n${conversationContext ? `Previous context:\n${conversationContext}\n` : ''}Message: "${(content || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\\n/g, ' ')}"` }
   ];
 
-  if (Array.isArray(mediaUrls) && mediaUrls.length > 0) {
-    mediaUrls.forEach(url => {
+  if (normalizedMediaUrls.length > 0) {
+    normalizedMediaUrls.forEach(url => {
       userContent.push({
         type: "image_url",
         image_url: { url }
@@ -188,17 +190,70 @@ If nothing qualifies, set should_forward false and category "irrelevant" or "gen
 
   messages.push({ role: "user", content: userContent });
 
-  try {
-    const res = await Promise.race([
+  async function requestClassification(messagePayload) {
+    return await Promise.race([
       getOpenAIClient().chat.completions.create({
         model: getOpenAIModel(),
-        messages,
+        messages: messagePayload,
         response_format: { type: "json_object" },
         max_tokens: 800,
         temperature: 0,
       }),
       new Promise((_, reject) => setTimeout(() => reject(new Error("OpenAI timeout")), 20000)),
     ]);
+  }
+
+  try {
+    let res;
+    try {
+      res = await requestClassification(messages);
+    } catch (error) {
+      const errMsg = String(error?.message || error);
+      const isImageDownloadTimeout =
+        hasVisionInput &&
+        (errMsg.includes('Timeout while downloading') || errMsg.includes('Error while downloading'));
+
+      if (!isImageDownloadTimeout) throw error;
+
+      console.warn(`⚠️ Vision fetch timeout, retrying with reduced image input: ${errMsg}`);
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+
+      try {
+        const retryMessages = [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: [
+              userContent[0],
+              {
+                type: "image_url",
+                image_url: { url: normalizedMediaUrls[0] }
+              }
+            ]
+          }
+        ];
+        res = await requestClassification(retryMessages);
+      } catch (retryError) {
+        const retryMsg = String(retryError?.message || retryError);
+        if (!(retryMsg.includes('Timeout while downloading') || retryMsg.includes('Error while downloading'))) {
+          throw retryError;
+        }
+        console.warn(`⚠️ Vision retry failed, falling back to text-only classification: ${retryMsg}`);
+        const textOnlyMessages = [
+          { role: "system", content: systemPrompt },
+          {
+            role: "user",
+            content: [
+              {
+                type: "text",
+                text: `${userContent[0].text}\nVision note: attached images could not be downloaded in time. Infer cautiously from text only.`
+              }
+            ]
+          }
+        ];
+        res = await requestClassification(textOnlyMessages);
+      }
+    }
 
     const parsed = JSON.parse(res.choices[0]?.message?.content?.trim() || "{}");
 
@@ -238,9 +293,14 @@ If nothing qualifies, set should_forward false and category "irrelevant" or "gen
 
 // ─── DB HELPERS ───────────────────────────────────────────────────────────────
 
-async function getMappingByTeams(teamsChatId) {
+async function getMappingByTeams(teamsChatId, tenantId = null) {
   try {
-    const r = await db(`SELECT * FROM channel_mappings WHERE teams_chat_id = $1 AND active = true LIMIT 1`, [teamsChatId]);
+    const r = tenantId
+      ? await db(
+          `SELECT * FROM channel_mappings WHERE teams_chat_id = $1 AND tenant_id = $2 AND active = true LIMIT 1`,
+          [teamsChatId, tenantId]
+        )
+      : await db(`SELECT * FROM channel_mappings WHERE teams_chat_id = $1 AND active = true LIMIT 1`, [teamsChatId]);
     return r.rows[0] || null;
   } catch { return null; }
 }
@@ -280,13 +340,13 @@ async function getMappingByWhatsAppGroup(groupName, tenantId = process.env.DEFAU
   } catch { return null; }
 }
 
-async function saveTask(source, sender, label, classification) {
+async function saveTask(source, sender, label, classification, tenantId = process.env.DEFAULT_TENANT_ID || "tenant-default") {
   if (!classification.task) return null;
   try {
     const result = await db(
-      `INSERT INTO tasks (source, client_name, platform_label, body, links, images, status, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, 'pending', NOW()) RETURNING id`,
-      [source, sender, label, classification.task, JSON.stringify(classification.links || []), JSON.stringify(classification.files || [])]
+      `INSERT INTO tasks (tenant_id, source, client_name, platform_label, body, links, images, status, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', NOW()) RETURNING id`,
+      [tenantId, source, sender, label, classification.task, JSON.stringify(classification.links || []), JSON.stringify(classification.files || [])]
     );
     const taskId = result.rows[0]?.id;
     console.log(`📋 Task saved: "${classification.task}" (id: ${taskId})`);
@@ -709,7 +769,7 @@ export async function processWhatsAppToTeams({ messageId, sender, content, sende
 
   let taskId = null;
   if (classification.task && classification.category !== "client_approval") {
-    taskId = await saveTask("whatsapp", sender, groupName || senderPhone, classification);
+    taskId = await saveTask("whatsapp", sender, groupName || senderPhone, classification, tenantId);
   }
 
   console.log(`🔍 Looking up mapping for: "${groupName}"`);
@@ -720,7 +780,7 @@ export async function processWhatsAppToTeams({ messageId, sender, content, sende
   if (classification.category === "client_approval") {
     try {
       const message = `✅ **Client Approval from ${groupName}**\n─────────────────────────────\n\n${classification.summary || content}`;
-      await sendToGroupChat(conv.conversation_id, message);
+      await sendToGroupChat(conv.conversation_id, message, { tenantId });
       if (String(conv.conversation_id || "").trim() !== expectedConversationId) {
         throw new Error(`Routing mismatch: expected ${expectedConversationId}, got ${conv.conversation_id}`);
       }
@@ -737,18 +797,24 @@ export async function processWhatsAppToTeams({ messageId, sender, content, sende
 
   try {
     const { sendTaskCardToTeams } = await import("../services/teamsService.js");
+    const detailItems = Array.isArray(classification.tasks) && classification.tasks.length > 0
+      ? classification.tasks
+      : [classification.summary || content].filter(Boolean);
+    const primaryTask =
+      classification.task ||
+      classification.tasks?.[0] ||
+      classification.summary ||
+      "New media from client";
     await sendTaskCardToTeams(conv.conversation_id, {
-      task: classification.summary || classification.task || "New media from client",
-      description: [
-        classification.tasks.length > 1 ? classification.tasks.map(t => `• ${t}`).join('\n') : (classification.summary || content),
-        ...(classification.media_insights || []).map((m) => `🖼️ ${m}`),
-      ].filter(Boolean).join('\n'),
+      task: primaryTask,
+      description: detailItems.map((item) => `• ${item}`).join('\n'),
       sender,
       groupName,
       files: classification.files || [],
       links: classification.links || [],
       mediaUrls,
       mediaInsights: classification.media_insights || [],
+      tenantId,
     });
     if (String(conv.conversation_id || "").trim() !== expectedConversationId) {
       throw new Error(`Routing mismatch: expected ${expectedConversationId}, got ${conv.conversation_id}`);
@@ -840,7 +906,7 @@ export async function processSlackToTeams({ messageId, messageIds, sender, conte
 
   let taskId = null;
   if (classification.task && classification.category !== 'client_approval') {
-    taskId = await saveTask("slack", sender, mapping?.project_name || channelName, classification);
+    taskId = await saveTask("slack", sender, mapping?.project_name || channelName, classification, slackTenantId);
   }
 
   const conv = {
@@ -855,7 +921,7 @@ export async function processSlackToTeams({ messageId, messageIds, sender, conte
   if (classification.category === 'client_approval') {
     try {
       const message = `✅ **Client Approval from #${channelName}**\n─────────────────────────────\n\n${classification.summary || content}`;
-      await sendToGroupChat(conv.conversation_id, message);
+      await sendToGroupChat(conv.conversation_id, message, { tenantId: slackTenantId });
       try { await db(`UPDATE slack_messages SET forwarded_to_teams=true, forwarded_at=NOW() WHERE id = ANY($1)`, [allMessageIds]); } catch { }
       await logForward({ source: "slack", destination: "teams", source_channel: channelName, dest_channel: conv.conversation_name, message_preview: classification.summary || content, status: "delivered", ai_category: classification.category, ai_reason: classification.reason, is_batched: isBatched });
       return { forwarded: true, chat: conv.conversation_name };
@@ -869,18 +935,24 @@ export async function processSlackToTeams({ messageId, messageIds, sender, conte
 
   try {
     const { sendTaskCardToTeams } = await import("../services/teamsService.js");
+    const detailItems = Array.isArray(classification.tasks) && classification.tasks.length > 0
+      ? classification.tasks
+      : [classification.summary || content].filter(Boolean);
+    const primaryTask =
+      classification.task ||
+      classification.tasks?.[0] ||
+      classification.summary ||
+      (isBatched ? "Grouped client feedback" : "New request from client");
     await sendTaskCardToTeams(conv.conversation_id, {
-      task: classification.summary || classification.task || (isBatched ? "Grouped client feedback" : "New request from client"),
-      description: [
-        classification.tasks.length > 1 ? classification.tasks.map(t => `• ${t}`).join('\n') : (classification.summary || content),
-        ...(classification.media_insights || []).map((m) => `🖼️ ${m}`),
-      ].filter(Boolean).join('\n'),
+      task: primaryTask,
+      description: detailItems.map((item) => `• ${item}`).join('\n'),
       sender,
       groupName: `${channelName} (Slack)`,
       files: [...files.map(f => f.name).filter(Boolean), ...(classification.files || [])],
       links: [...links, ...(classification.links || [])],
       mediaUrls: taskMediaUrls,
       mediaInsights: classification.media_insights || [],
+      tenantId: slackTenantId,
     });
 
     console.log(`✅ OpenClaw task card sent: ${channelName} → ${conv.conversation_name}`);
@@ -948,6 +1020,10 @@ export async function runAgentAnalysis({ source, sender, content, messageId, med
 
   // Teams-chat — skip debouncing
   if (source === "teams-chat") {
+    if (TEAMS_OUTBOUND_DISABLED) {
+      console.log("⏭️ Teams→other forwarding is disabled (one-way mode)");
+      return;
+    }
     try {
       const r = await db(`SELECT * FROM teams_messages WHERE id=$1`, [messageId]);
       const msg = r.rows[0];

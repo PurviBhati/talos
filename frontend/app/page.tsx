@@ -134,13 +134,16 @@ const SLACK_MAP: Record<string, string> = {
 
 const resolveSlack = (id: string, name: string) => SLACK_MAP[id] || SLACK_MAP[name] || name || id;
 
-const authHeaders = (): HeadersInit => {
-  const headers: Record<string, string> = {};
-  if (typeof window === 'undefined') return headers;
-  const token = localStorage.getItem('token');
-  if (token) headers.Authorization = `Bearer ${token}`;
-  return headers;
-};
+const authHeaders = (): HeadersInit => ({});
+
+async function apiFetchJson<T>(input: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(input, init);
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok || payload?.success === false) {
+    throw new Error(payload?.error || payload?.message || `HTTP ${response.status}`);
+  }
+  return (payload?.data ?? payload) as T;
+}
 
 const ICONS = {
   slack: (size = 16, color = '#E01E5A') => (
@@ -330,6 +333,19 @@ interface ForwardLog {
   media_urls?: string | string[];
 }
 
+interface LinkRead {
+  id: number;
+  source: string;
+  source_message_id?: number;
+  platform_label?: string;
+  sender?: string;
+  sender_handle?: string;
+  comment_body?: string;
+  url: string;
+  read_content?: string;
+  created_at: string;
+}
+
 // ─── Shared Components & Types ───────────────────────────────────────────────
 function LinkPreview({ url }: { url: string }) {
   const [data, setData] = useState<any>(null);
@@ -431,7 +447,7 @@ function clean(h: string) {
     .trim();
 }
 
-type NavSection = 'governance' | 'teams' | 'slack' | 'whatsapp' | 'tasks' | 'admin' | 'settings' | 'summaries' | 'forward-log';
+type NavSection = 'governance' | 'teams' | 'slack' | 'whatsapp' | 'tasks' | 'link-reads' | 'admin' | 'settings' | 'summaries' | 'forward-log';
 
 const SLACK_CHANNELS = [
   { id: 'C0AHHG10HDG', name: '#openclawtest' },
@@ -499,10 +515,10 @@ function SectionHeader({ title, sub, onRefresh, loading }: { title: string; sub:
   );
 }
 
-function EmptyState({ message = 'No messages', type = 'info' }: { message?: string, type?: 'info' | 'success' }) {
+function EmptyState({ message = 'No messages', type = 'info' }: { message?: string, type?: 'info' | 'success' | 'error' }) {
   return (
     <div style={{ textAlign: 'center', color: C.dim, padding: '60px 20px', background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 14 }}>
-      {type === 'success' ? ICONS.check(32, C.accent) : ICONS.logo(32, C.dim)}
+      {type === 'success' ? ICONS.check(32, C.accent) : type === 'error' ? ICONS.error(32, '#ef4444') : ICONS.logo(32, C.dim)}
       <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{message}</div>
     </div>
   );
@@ -615,6 +631,7 @@ function Dropdown({ label, icon, color, options, onSelect, disabled }: {
 function GovernanceSection() {
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
   const [localDrafts, setLocalDrafts] = useState<Record<number, string>>({});
   const [savingId, setSavingId] = useState<number | null>(null);
   const [waGroups, setWaGroups] = useState<WAGroup[]>([]);
@@ -624,19 +641,22 @@ function GovernanceSection() {
 
   const fetchDrafts = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      const r = await fetch(`${API}/api/messages/drafts`, { headers: authHeaders() });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      setDrafts(Array.isArray(data) ? data : (data.drafts || []));
-    } catch (err) { console.error('[Governance drafts]', err); }
+      const data = await apiFetchJson<Draft[]>(`${API}/api/messages/drafts`, { headers: authHeaders() });
+      setDrafts(Array.isArray(data) ? data : []);
+    } catch (err: any) {
+      console.error('[Governance drafts]', err);
+      setError(err?.message || 'Failed to load drafts');
+      setDrafts([]);
+    }
     finally { setLoading(false); }
   }, []);
 
   const fetchWAGroups = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/api/messages/whatsapp-groups`, { headers: authHeaders() });
-      if (r.ok) { const data = await r.json(); setWaGroups(Array.isArray(data) ? data : []); }
+      const data = await apiFetchJson<WAGroup[]>(`${API}/api/messages/whatsapp-groups`, { headers: authHeaders() });
+      setWaGroups(Array.isArray(data) ? data : []);
     } catch { }
   }, []);
 
@@ -655,9 +675,9 @@ function GovernanceSection() {
     const text = localDrafts[draft.id] ?? (draft.approved_draft || draft.content);
     setSending(p => new Set([...p, draft.id]));
     try {
-      const r = await fetch(`${API}/api/messages/approve/${draft.id}`, {
+      await apiFetchJson(`${API}/api/messages/approve/${draft.id}`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({
           platform,
           editedContent: text,
@@ -666,7 +686,7 @@ function GovernanceSection() {
           whatsappGroup: platform === 'whatsapp' ? target : undefined,
         }),
       });
-      if (r.ok) fetchDrafts();
+      fetchDrafts();
     } catch (err) { console.error('[Approve]', err); }
     finally {
       setSending(p => { const n = new Set(p); n.delete(draft.id); return n; });
@@ -681,7 +701,7 @@ function GovernanceSection() {
     try {
       await fetch(`${API}/api/messages/drafts/${id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ content })
       });
       setDrafts(prev => prev.map(d => d.id === id ? { ...d, approved_draft: content } : d));
@@ -692,7 +712,7 @@ function GovernanceSection() {
   }
 
   async function handleIgnore(id: number) {
-    await fetch(`${API}/api/messages/ignore/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json' } });
+    await apiFetchJson(`${API}/api/messages/ignore/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() } });
     setDrafts(prev => prev.filter(d => d.id !== id));
   }
 
@@ -749,6 +769,8 @@ function GovernanceSection() {
       </div>
       {loading ? (
         <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading...</div>
+      ) : error ? (
+        <EmptyState message={error} type="error" />
       ) : pending.length === 0 ? (
         <EmptyState message="No pending AI drafts" />
       ) : (
@@ -835,15 +857,19 @@ function TeamsSection() {
   const [messages, setMessages] = useState<TeamsMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [dismissed, setDismissed] = useState<Set<number>>(new Set());
+  const [error, setError] = useState('');
 
   const fetchMessages = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      const r = await fetch(`${API}/api/teams/messages/chats`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
+      const data = await apiFetchJson<TeamsMessage[]>(`${API}/api/teams/messages/chats`, { headers: authHeaders() });
       setMessages(Array.isArray(data) ? data : []);
-    } catch (err) { console.error('[Teams]', err); }
+    } catch (err: any) {
+      console.error('[Teams]', err);
+      setError(err?.message || 'Failed to load Teams messages');
+      setMessages([]);
+    }
     finally { setLoading(false); }
   }, []);
 
@@ -855,7 +881,7 @@ function TeamsSection() {
 
   async function handleDismiss(id: number) {
     setDismissed(p => new Set([...p, id]));
-    await fetch(`${API}/api/teams/messages/${id}/dismiss`, { method: 'PATCH' }).catch(() => { });
+    await apiFetchJson(`${API}/api/teams/messages/${id}/dismiss`, { method: 'PATCH', headers: authHeaders() }).catch(() => { });
   }
 
   const visible = messages.filter(m => !dismissed.has(m.id) && !m.dismissed);
@@ -864,6 +890,7 @@ function TeamsSection() {
     <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
       <SectionHeader title="Teams Messages" sub="Incoming messages from monitored group chats" onRefresh={fetchMessages} loading={loading} />
       {loading ? <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading...</div>
+        : error ? <EmptyState message={error} type="error" />
         : visible.length === 0 ? <EmptyState message="No Teams messages" />
           : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1070,22 +1097,26 @@ function WhatsAppSection() {
   const [forwarded, setForwarded] = useState<Set<number>>(new Set());
   const [editMap, setEditMap] = useState<Record<number, string>>({});
   const [editingId, setEditingId] = useState<number | null>(null);
+  const [error, setError] = useState('');
 
   const fetchMessages = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      const r = await fetch(`${API}/api/whatsapp/messages`);
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
+      const data = await apiFetchJson<WhatsAppMessage[]>(`${API}/api/whatsapp/messages`, { headers: authHeaders() });
       setMessages(Array.isArray(data) ? data : []);
-    } catch (err) { console.error('[WhatsApp]', err); }
+    } catch (err: any) {
+      console.error('[WhatsApp]', err);
+      setError(err?.message || 'Failed to load WhatsApp messages');
+      setMessages([]);
+    }
     finally { setLoading(false); }
   }, []);
 
   const fetchTeamsChats = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/api/slack/teams-chats`, { headers: authHeaders() });
-      if (r.ok) { const data = await r.json(); setTeamsChats(Array.isArray(data) ? data : []); }
+      const data = await apiFetchJson<TeamsChat[]>(`${API}/api/slack/teams-chats`, { headers: authHeaders() });
+      setTeamsChats(Array.isArray(data) ? data : []);
     } catch { }
   }, []);
 
@@ -1104,10 +1135,10 @@ function WhatsAppSection() {
     setForwarding(p => new Set([...p, msg.id]));
     const body = editingId === msg.id ? (editMap[msg.id] || msg.body) : msg.body;
     try {
-      if (body) await fetch(`${API}/api/whatsapp/forward`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msgId: msg.id, chatId, editedBody: body }) });
+      if (body) await apiFetchJson(`${API}/api/whatsapp/forward`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ msgId: msg.id, chatId, editedBody: body }) });
       const mediaUrls = parseLinks(msg.media_urls);
       for (const url of mediaUrls) {
-        await fetch(`${API}/api/whatsapp/forward-image`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageId: msg.id, chatId, mediaUrl: url }) });
+        await apiFetchJson(`${API}/api/whatsapp/forward-image`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ messageId: msg.id, chatId, mediaUrl: url }) });
       }
       setForwarded(p => new Set([...p, msg.id]));
       setTimeout(() => setDismissed(p => new Set([...p, msg.id])), 1500);
@@ -1122,6 +1153,7 @@ function WhatsAppSection() {
     <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
       <SectionHeader title="WhatsApp Messages" sub="Forward WhatsApp messages to Microsoft Teams" onRefresh={fetchMessages} loading={loading} />
       {loading ? <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading...</div>
+        : error ? <EmptyState message={error} type="error" />
         : visible.length === 0 ? <EmptyState message="No WhatsApp messages" />
           : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1449,14 +1481,19 @@ function SummariesSection() {
 function TaskSection() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
   const fetchTasks = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
-      const r = await fetch(`${API}/api/tasks`);
-      const data = await r.json();
+      const data = await apiFetchJson<Task[]>(`${API}/api/tasks`, { headers: authHeaders() });
       setTasks(Array.isArray(data) ? data : []);
-    } catch (err) { console.error('[Tasks]', err); }
+    } catch (err: any) {
+      console.error('[Tasks]', err);
+      setError(err?.message || 'Failed to load tasks');
+      setTasks([]);
+    }
     finally { setLoading(false); }
   }, []);
 
@@ -1464,9 +1501,9 @@ function TaskSection() {
 
   async function updateStatus(id: number, status: string) {
     try {
-      await fetch(`${API}/api/tasks/${id}/status`, {
+      await apiFetchJson(`${API}/api/tasks/${id}/status`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...authHeaders() },
         body: JSON.stringify({ status })
       });
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status } : t));
@@ -1479,6 +1516,7 @@ function TaskSection() {
     <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
       <SectionHeader title="Task Planner" sub="Actionable requests assigned to Microsoft Teams" onRefresh={fetchTasks} loading={loading} />
       {loading ? <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading tasks...</div>
+        : error ? <EmptyState message={error} type="error" />
         : pending.length === 0 ? <EmptyState message="No pending tasks" />
           : (
             <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -1544,36 +1582,361 @@ function TaskSection() {
     </div>
   );
 }
+
+function LinkReadsSection() {
+  const [items, setItems] = useState<LinkRead[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedReads, setExpandedReads] = useState<Record<number, boolean>>({});
+  const [expandedRawReads, setExpandedRawReads] = useState<Record<number, boolean>>({});
+  const [error, setError] = useState('');
+
+  function cleanSnippet(value: string, max = 280) {
+    const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+    if (!normalized) return '';
+    return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
+  }
+
+  function parseCommentPoints(commentBody: string) {
+    const raw = String(commentBody || '').trim();
+    if (!raw) return [];
+
+    const normalized = raw.replace(/\[Quoted:\s*(https?:\/\/[^\]\s]+)\s*\]/gi, '\nQuoted link: $1');
+    const lines = normalized
+      .split(/\n+|(?=Quoted link:\s*https?:\/\/)|(?=Source link:\s*https?:\/\/)/g)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    const basePoints = lines.length > 1
+      ? lines
+      : normalized
+          .split(/(?<=[.!?])\s+/)
+          .map((part) => part.trim())
+          .filter(Boolean);
+
+    return basePoints.map((point, idx) => {
+      const labelMatch = point.match(/^(Quoted link|Source link):\s*(https?:\/\/\S+)/i);
+      if (labelMatch) {
+        return {
+          key: `link-${idx}`,
+          text: labelMatch[1],
+          href: labelMatch[2],
+        };
+      }
+
+      const urlMatch = point.match(/(https?:\/\/\S+)/i);
+      if (urlMatch) {
+        return {
+          key: `mixed-${idx}`,
+          text: cleanSnippet(point.replace(urlMatch[1], '').trim(), 180) || 'Link',
+          href: urlMatch[1],
+        };
+      }
+
+      return {
+        key: `text-${idx}`,
+        text: cleanSnippet(point, 220),
+        href: '',
+      };
+    }).filter((item) => item.text || item.href);
+  }
+
+  function parseFigmaReadContent(readContent: string) {
+    const raw = String(readContent || '').trim();
+    if (!raw) return null;
+    if (!/figma/i.test(raw)) return null;
+
+    const title = raw.match(/Title:\s*([\s\S]*?)(?=\s+URL Source:|$)/i)?.[1]?.trim() || '';
+    const source = raw.match(/URL Source:\s*([\s\S]*?)(?=\s+Published Time:|$)/i)?.[1]?.trim() || '';
+    const publishedTime = raw.match(/Published Time:\s*([\s\S]*?)(?=\s+Markdown Content:|$)/i)?.[1]?.trim() || '';
+    const markdown = raw.match(/Markdown Content:\s*([\s\S]*)$/i)?.[1]?.trim() || '';
+
+    const commentMatches = [...markdown.matchAll(/#\d+\s+([^\n#]+?)\s+(\d+\s+\w+\s+ago)\s+([\s\S]*?)(?=\s+#\d+\s+|$)/g)];
+    const comments = commentMatches
+      .map((match, idx) => ({
+        key: `figma-comment-${idx}`,
+        author: cleanSnippet(match[1], 60),
+        age: cleanSnippet(match[2], 40),
+        text: cleanSnippet(match[3].replace(/!\[.*?\]\(.*?\)/g, '').trim(), 220),
+      }))
+      .filter((item) => item.text);
+
+    return {
+      title: cleanSnippet(title, 120),
+      source,
+      publishedTime: cleanSnippet(publishedTime, 80),
+      comments: comments.slice(0, 5),
+      rawMarkdown: markdown,
+    };
+  }
+
+  function formatReadContentPoints(readContent: string): string[] {
+    const raw = String(readContent || '').trim();
+    if (!raw) return [];
+
+    const chunks = raw
+      .split(/\s*(?=Title:|URL Source:|Published Time:|Markdown Content:|Comment:)\s*/g)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+    if (chunks.length > 1) {
+      return chunks.slice(0, 8).map((chunk) => {
+        const normalized = chunk.replace(/\s+/g, ' ').trim();
+        return normalized.length > 280 ? `${normalized.slice(0, 280)}...` : normalized;
+      });
+    }
+
+    return raw
+      .split(/\n+/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .slice(0, 10)
+      .map((line) => (line.length > 280 ? `${line.slice(0, 280)}...` : line));
+  }
+
+  function toggleExpandedRead(id: number) {
+    setExpandedReads((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  function toggleExpandedRawRead(id: number) {
+    setExpandedRawReads((prev) => ({ ...prev, [id]: !prev[id] }));
+  }
+
+  const fetchReads = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await apiFetchJson<LinkRead[]>(`${API}/api/link-reads?limit=120`, { headers: authHeaders() });
+      setItems(Array.isArray(data) ? data : []);
+    } catch (err: any) {
+      console.error('[LinkReads]', err);
+      setError(err?.message || 'Failed to load link reads');
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { fetchReads(); }, [fetchReads]);
+
+  return (
+    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
+      <SectionHeader
+        title="Link Reads"
+        sub="Jina URL reads with source, sender, comment, and extracted content"
+        onRefresh={fetchReads}
+        loading={loading}
+      />
+
+      {loading ? (
+        <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading link reads...</div>
+      ) : error ? (
+        <EmptyState message={error} type="error" />
+      ) : items.length === 0 ? (
+        <EmptyState message="No link reads yet" />
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {items.map((row) => (
+            <div key={row.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: '16px 18px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: 10, fontWeight: 800, color: C.accent, background: `${C.accent}18`, border: `1px solid ${C.accent}44`, borderRadius: 6, padding: '3px 8px', textTransform: 'uppercase' }}>
+                    {row.source || 'unknown'}
+                  </span>
+                  <span style={{ fontSize: 12, color: C.text, fontWeight: 700 }}>
+                    {row.sender || row.sender_handle || 'Unknown sender'}
+                  </span>
+                  {row.platform_label && (
+                    <span style={{ fontSize: 11, color: C.dim }}>
+                      via {row.platform_label}
+                    </span>
+                  )}
+                </div>
+                <span style={{ fontSize: 11, color: C.dim }}>
+                  {row.created_at ? new Date(row.created_at).toLocaleString('en-IN') : ''}
+                </span>
+              </div>
+
+              <a
+                href={row.url}
+                target="_blank"
+                rel="noopener noreferrer"
+                style={{ display: 'block', fontSize: 12, color: C.accent, textDecoration: 'none', marginBottom: 10, wordBreak: 'break-all' }}
+              >
+                {row.url}
+              </a>
+
+              {row.comment_body && (
+                <div style={{ fontSize: 12, color: C.text, background: `${C.sidebar}66`, border: `1px solid ${C.border}44`, borderRadius: 10, padding: 10, marginBottom: 10 }}>
+                  <b>Comment:</b>
+                  <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                    {parseCommentPoints(row.comment_body).map((point) => (
+                      <li key={`${row.id}-${point.key}`} style={{ marginBottom: 4, wordBreak: 'break-word' }}>
+                        {point.text}
+                        {point.href && (
+                          <>
+                            {point.text ? ' ' : ''}
+                            <a
+                              href={point.href}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              style={{ color: C.accent, textDecoration: 'none', fontWeight: 700 }}
+                            >
+                              {point.text.toLowerCase().includes('quoted') ? 'Open quoted link' : 'Open link'}
+                            </a>
+                          </>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div style={{ fontSize: 12, color: C.text, lineHeight: 1.5, background: `${C.sidebar}66`, border: `1px solid ${C.border}44`, borderRadius: 10, padding: 10 }}>
+                <b>Read Content:</b>
+                {row.read_content ? (() => {
+                  const figmaData = parseFigmaReadContent(row.read_content);
+                  const points = formatReadContentPoints(row.read_content);
+                  const expanded = !!expandedReads[row.id];
+                  const visiblePoints = expanded ? points : points.slice(0, 5);
+                  const canExpand = points.length > 5;
+                  const rawExpanded = !!expandedRawReads[row.id];
+
+                  return (
+                    <>
+                      {figmaData ? (
+                        <div style={{ marginTop: 8 }}>
+                          <div style={{ display: 'grid', gap: 8 }}>
+                            {figmaData.title && (
+                              <div><b>Title:</b> {figmaData.title}</div>
+                            )}
+                            {figmaData.source && (
+                              <div>
+                                <b>Source:</b>{' '}
+                                <a href={figmaData.source} target="_blank" rel="noopener noreferrer" style={{ color: C.accent, textDecoration: 'none' }}>
+                                  Open source link
+                                </a>
+                              </div>
+                            )}
+                            {figmaData.publishedTime && (
+                              <div><b>Published:</b> {figmaData.publishedTime}</div>
+                            )}
+                          </div>
+
+                          {figmaData.comments.length > 0 && (
+                            <>
+                              <div style={{ marginTop: 10, fontWeight: 700 }}>Top comments</div>
+                              <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                                {figmaData.comments.map((comment) => (
+                                  <li key={`${row.id}-${comment.key}`} style={{ marginBottom: 6, wordBreak: 'break-word' }}>
+                                    <b>{comment.author}</b>{comment.age ? ` (${comment.age})` : ''}: {comment.text}
+                                  </li>
+                                ))}
+                              </ul>
+                            </>
+                          )}
+
+                          {figmaData.rawMarkdown && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={() => toggleExpandedRawRead(row.id)}
+                                style={{
+                                  marginTop: 8,
+                                  border: 'none',
+                                  background: 'transparent',
+                                  color: C.accent,
+                                  fontSize: 12,
+                                  fontWeight: 700,
+                                  cursor: 'pointer',
+                                  padding: 0,
+                                }}
+                              >
+                                {rawExpanded ? 'Hide raw content' : 'Show raw content'}
+                              </button>
+                              {rawExpanded && (
+                                <div style={{ marginTop: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: C.dim }}>
+                                  {cleanSnippet(figmaData.rawMarkdown, 1500)}
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      ) : (
+                        <>
+                          <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
+                            {visiblePoints.map((point, idx) => (
+                              <li key={`${row.id}-rc-${idx}`} style={{ marginBottom: 4, wordBreak: 'break-word' }}>
+                                {point}
+                              </li>
+                            ))}
+                          </ul>
+                          {canExpand && (
+                            <button
+                              type="button"
+                              onClick={() => toggleExpandedRead(row.id)}
+                              style={{
+                                marginTop: 8,
+                                border: 'none',
+                                background: 'transparent',
+                                color: C.accent,
+                                fontSize: 12,
+                                fontWeight: 700,
+                                cursor: 'pointer',
+                                padding: 0,
+                              }}
+                            >
+                              {expanded ? 'Show less' : `Show more (${points.length - visiblePoints.length} more)`}
+                            </button>
+                          )}
+                        </>
+                      )}
+                    </>
+                  );
+                })() : (
+                  <div style={{ marginTop: 6 }}>No readable content extracted.</div>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ForwardLogSection() {
   const [logs, setLogs] = useState<ForwardLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<'all' | 'delivered' | 'failed' | 'skipped'>('all');
   const [sourceFilter, setSourceFilter] = useState<'all' | 'whatsapp' | 'slack' | 'teams'>('all');
+  const [error, setError] = useState('');
 
   const fetchLogs = useCallback(async () => {
     setLoading(true);
+    setError('');
     try {
       const params = new URLSearchParams({ limit: '100' });
       if (filter !== 'all') params.append('status', filter);
       if (sourceFilter !== 'all') params.append('source', sourceFilter);
-      let r: Response;
+      let data: ForwardLog[];
       try {
-        r = await fetch(`${API}/api/forward-logs?${params}`);
+        data = await apiFetchJson<ForwardLog[]>(`${API}/api/forward-logs?${params}`, { headers: authHeaders() });
       } catch {
         // Local fallback only; deployed frontend must use NEXT_PUBLIC_API_URL.
         if (
           typeof window !== 'undefined' &&
           (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
         ) {
-          r = await fetch(`http://${window.location.hostname}:5000/api/forward-logs?${params}`);
+          data = await apiFetchJson<ForwardLog[]>(`http://${window.location.hostname}:5000/api/forward-logs?${params}`, { headers: authHeaders() });
         } else {
           throw new Error('API base URL is unreachable. Set NEXT_PUBLIC_API_URL.');
         }
       }
-      const data = await r.json();
       setLogs(Array.isArray(data) ? data : []);
-    } catch (err) {
+    } catch (err: any) {
       console.error('[ForwardLog]', err);
+      setError(err?.message || 'Failed to load forward logs');
+      setLogs([]);
     } finally {
       setLoading(false);
     }
@@ -1666,6 +2029,8 @@ function ForwardLogSection() {
       {/* Logs grouped by date */}
       {loading ? (
         <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading logs...</div>
+      ) : error ? (
+        <EmptyState message={error} type="error" />
       ) : logs.length === 0 ? (
         <EmptyState message="No flow logs recorded matching current filters." />
       ) : (
@@ -1776,21 +2141,14 @@ function AdminSection() {
   const fetchHealth = async () => {
     setLoading(true);
     try {
-      const r = await fetch(`${API}/api/messages/health`, {
+      const data = await apiFetchJson<any>(`${API}/api/messages/health`, {
         headers: {
           'Content-Type': 'application/json',
           ...authHeaders(),
         }
       });
-      if (r.ok) {
-        const data = await r.json();
-        console.log('Health data received:', data);
-        setHealth(data);
-      } else {
-        const errText = await r.text();
-        console.error('Health check failed:', r.status, errText);
-        setHealth(null);
-      }
+      console.log('Health data received:', data);
+      setHealth(data);
     } catch (err) {
       console.error('Health check fetch error:', err);
       setHealth(null);
@@ -2377,21 +2735,17 @@ export default function Dashboard() {
   useEffect(() => {
     async function fetchCounts() {
       try {
-        const [dR, tR, sR, wR, sumR] = await Promise.all([
-          fetch(`${API}/api/messages/drafts`, { headers: authHeaders() }),
-          fetch(`${API}/api/teams/messages/chats`),
-          fetch(`${API}/api/slack/messages`, { headers: authHeaders() }),
-          fetch(`${API}/api/whatsapp/messages`),
-          fetch(`${PYTHON_API}/summaries`),
+        const [drafts, teamsData, slackData, whatsappData, sumD] = await Promise.all([
+          apiFetchJson<any[]>(`${API}/api/messages/drafts`, { headers: authHeaders() }),
+          apiFetchJson<any[]>(`${API}/api/teams/messages/chats`, { headers: authHeaders() }),
+          apiFetchJson<any[]>(`${API}/api/slack/messages`, { headers: authHeaders() }),
+          apiFetchJson<any[]>(`${API}/api/whatsapp/messages`, { headers: authHeaders() }),
+          apiFetchJson<any>(`${PYTHON_API}/summaries`),
         ]);
-        const dD = await dR.json(); const tD = await tR.json();
-        const sD = await sR.json(); const wD = await wR.json();
-        const sumD = await sumR.json();
-        const drafts = Array.isArray(dD) ? dD : (dD.drafts || []);
         setDraftCount(drafts.filter((d: any) => !d.approval_status || d.approval_status === 'waiting').length);
-        if (Array.isArray(tD)) setTeamsCount(tD.filter((m: any) => !m.dismissed).length);
-        if (Array.isArray(sD)) setSlackCount(sD.filter((m: any) => !m.dismissed).length);
-        if (Array.isArray(wD)) setWaCount(wD.filter((m: any) => !m.dismissed).length);
+        if (Array.isArray(teamsData)) setTeamsCount(teamsData.filter((m: any) => !m.dismissed).length);
+        if (Array.isArray(slackData)) setSlackCount(slackData.filter((m: any) => !m.dismissed).length);
+        if (Array.isArray(whatsappData)) setWaCount(whatsappData.filter((m: any) => !m.dismissed).length);
         if (sumD.summaries) setSummaryCount(sumD.summaries.length);
       } catch { }
     }
@@ -2407,6 +2761,7 @@ export default function Dashboard() {
     { key: 'whatsapp', icon: ICONS.whatsapp(18, activeNav === 'whatsapp' ? C.wa : C.muted), label: 'WhatsApp Messages', sub: 'Forward to Teams', badge: waCount },
     { key: 'summaries', icon: ICONS.summaries(18, activeNav === 'summaries' ? C.teams : C.muted), label: 'Chat Summaries', sub: 'AI channel summaries', badge: summaryCount },
     { key: 'tasks', icon: ICONS.taskPlanner(18, activeNav === 'tasks' ? C.accent : C.muted), label: 'Task Planner', sub: 'Links & assets from clients' },
+    { key: 'link-reads', icon: ICONS.link(18, activeNav === 'link-reads' ? C.accent : C.muted), label: 'Link Reads', sub: 'Jina URL extraction log' },
     { key: 'forward-log', icon: ICONS.log(18, activeNav === 'forward-log' ? C.accent : C.muted), label: 'Forward Log', sub: 'Delivery status & errors' },
     { key: 'admin', icon: <span style={{ fontSize: 18 }}>⚙️</span>, label: 'System Admin', sub: 'Health & monitoring' },
   ];
@@ -2530,6 +2885,7 @@ export default function Dashboard() {
         {activeNav === 'summaries' && <SummariesSection />}
         {activeNav === 'forward-log' && <ForwardLogSection />}
         {activeNav === 'tasks' && <TaskSection />}
+        {activeNav === 'link-reads' && <LinkReadsSection />}
         {activeNav === 'admin' && <AdminSection />}
       </div>
     </div>

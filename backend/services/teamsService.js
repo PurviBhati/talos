@@ -30,6 +30,27 @@ function escapeHtml(text = '') {
     .replace(/>/g, '&gt;');
 }
 
+function buildFallbackConversationReference(conversationId) {
+  const serviceUrl = String(process.env.TEAMS_SERVICE_URL || 'https://smba.trafficmanager.net/teams/').trim();
+  const tenantId = String(process.env.TENANT_ID || '').trim();
+  const botId = String(process.env.CLIENT_ID || process.env.MicrosoftAppId || '').trim();
+  const botName = String(process.env.BOT_NAME || 'UnifiedHub-Bot').trim();
+
+  if (!serviceUrl || !tenantId || !botId) {
+    throw new Error(
+      'Teams fallback reference is missing required env vars (TEAMS_SERVICE_URL/TENANT_ID/CLIENT_ID)'
+    );
+  }
+
+  return {
+    bot: { id: botId, name: botName },
+    conversation: { id: conversationId, isGroup: true, tenantId },
+    serviceUrl,
+    channelId: 'msteams',
+    locale: 'en-US',
+  };
+}
+
 async function sendToChatViaGraph(conversationId, message) {
   if (!isLikelyChatId(conversationId)) {
     throw new Error(`Invalid Teams chat id for Graph fallback: ${conversationId}`);
@@ -53,23 +74,29 @@ async function sendToChatViaGraph(conversationId, message) {
   return { activityId: data?.id || null };
 }
 
-export async function sendToGroupChat(conversationId, message) {
-  const ref = await conversationStore.getById(conversationId);
+export async function sendToGroupChat(conversationId, message, options = {}) {
+  const tenantId = options?.tenantId || null;
+  const ref = await conversationStore.getById(conversationId, tenantId);
+  let conversationReference;
+  let conversationName = conversationId;
+  let resolvedConversationId = conversationId;
+
   if (!ref) {
-    console.warn(`⚠️ Conversation ref missing for ${conversationId}; using Graph fallback`);
-    const fallback = await sendToChatViaGraph(conversationId, message);
-    return { activityId: fallback.activityId || `graph-${Date.now()}` };
+    console.warn(`⚠️ Conversation ref missing for ${conversationId}; using proactive fallback reference`);
+    conversationReference = buildFallbackConversationReference(conversationId);
+  } else {
+    conversationName = ref.conversation_name || conversationId;
+    resolvedConversationId = ref.conversation_id || conversationId;
+    conversationReference = {
+      bot: { id: ref.bot_id, name: ref.bot_name },
+      conversation: { id: ref.conversation_id, isGroup: true, tenantId: ref.tenant_id },
+      serviceUrl: ref.service_url,
+      channelId: 'msteams',
+      locale: 'en-US',
+    };
   }
 
-  console.log(`📤 Sending to: ${ref.conversation_name} (${ref.conversation_id})`);
-
-  const conversationReference = {
-    bot: { id: ref.bot_id, name: ref.bot_name },
-    conversation: { id: ref.conversation_id, isGroup: true, tenantId: ref.tenant_id },
-    serviceUrl: ref.service_url,
-    channelId: 'msteams',
-    locale: 'en-US',
-  };
+  console.log(`📤 Sending to: ${conversationName} (${conversationId})`);
 
   let activityId = null;
   try {
@@ -79,39 +106,40 @@ export async function sendToGroupChat(conversationId, message) {
     });
   } catch (err) {
     if (isRosterError(err)) {
-      throw new Error(`Bot is not in Teams chat roster: ${ref.conversation_id}`);
+      throw new Error(`Bot is not in Teams chat roster: ${resolvedConversationId}`);
     }
     throw err;
   }
 
   if (!activityId) {
-    throw new Error(`Teams send failed (no activity id): ${ref.conversation_id}`);
+    throw new Error(`Teams send failed (no activity id): ${resolvedConversationId}`);
   }
 
-  console.log(`✅ Message sent to: ${ref.conversation_name}`);
+  console.log(`✅ Message sent to: ${conversationName}`);
   return { activityId };
 }
 
-export async function getAllGroupChats() {
-  return await conversationStore.getAll();
+export async function getAllGroupChats(tenantId = null) {
+  return await conversationStore.getAll(tenantId);
 }
 
-export async function sendImageToGroupChat(conversationId, imageUrl, caption) {
-  const ref = await conversationStore.getById(conversationId);
+export async function sendImageToGroupChat(conversationId, imageUrl, caption, options = {}) {
+  const tenantId = options?.tenantId || null;
+  const ref = await conversationStore.getById(conversationId, tenantId);
+  const resolvedConversationId = ref?.conversation_id || conversationId;
+  const resolvedConversationName = ref?.conversation_name || conversationId;
+  const conversationReference = ref
+    ? {
+        bot: { id: ref.bot_id, name: ref.bot_name },
+        conversation: { id: ref.conversation_id, isGroup: true, tenantId: ref.tenant_id },
+        serviceUrl: ref.service_url,
+        channelId: 'msteams',
+        locale: 'en-US',
+      }
+    : buildFallbackConversationReference(conversationId);
   if (!ref) {
-    console.warn(`⚠️ Conversation ref missing for ${conversationId}; sending image URL via Graph fallback`);
-    const text = caption?.trim() ? `${caption}\n${imageUrl}` : imageUrl;
-    await sendToChatViaGraph(conversationId, text);
-    return;
+    console.warn(`⚠️ Conversation ref missing for ${conversationId}; using proactive fallback reference for image send`);
   }
-
-  const conversationReference = {
-    bot: { id: ref.bot_id, name: ref.bot_name },
-    conversation: { id: ref.conversation_id, isGroup: true, tenantId: ref.tenant_id },
-    serviceUrl: ref.service_url,
-    channelId: 'msteams',
-    locale: 'en-US',
-  };
 
   const filename = imageUrl.split('?')[0].split('/').pop() || 'image.jpg';
   let publicUrl = imageUrl;
@@ -165,16 +193,16 @@ export async function sendImageToGroupChat(conversationId, imageUrl, caption) {
     });
   } catch (err) {
     if (isRosterError(err)) {
-      throw new Error(`Bot is not in Teams chat roster: ${ref.conversation_id}`);
+      throw new Error(`Bot is not in Teams chat roster: ${resolvedConversationId}`);
     }
     throw err;
   }
 
   if (!sentActivityId) {
-    throw new Error(`Teams image send failed (no activity id): ${ref.conversation_id}`);
+    throw new Error(`Teams image send failed (no activity id): ${resolvedConversationId}`);
   }
 
-  console.log(`✅ Image sent to: ${ref.conversation_name}`);
+  console.log(`✅ Image sent to: ${resolvedConversationName}`);
 }
 
 export async function sendImageToTeams(conv, senderName, imageName, imageUrl, mimeType) {
@@ -200,42 +228,81 @@ export async function sendImageToTeams(conv, senderName, imageName, imageUrl, mi
 
 // ─── ADD THIS FUNCTION TO teamsService.js ────────────────────────────────────
 
-export async function sendTaskCardToTeams(conversationId, { task, description, sender, groupName, files = [], links = [], mediaUrls = [], mediaInsights = [] }) {  const ref = await conversationStore.getById(conversationId);
-  if (!ref) throw new Error(`Conversation not found: ${conversationId}`);
-
-  const conversationReference = {
-    bot: { id: ref.bot_id, name: ref.bot_name },
-    conversation: { id: ref.conversation_id, isGroup: true, tenantId: ref.tenant_id },
-    serviceUrl: ref.service_url,
-    channelId: 'msteams',
-    locale: 'en-US',
-  };
+export async function sendTaskCardToTeams(conversationId, { task, description, sender, groupName, files = [], links = [], mediaUrls = [], mediaInsights = [], tenantId = null }) {  const ref = await conversationStore.getById(conversationId, tenantId);
+  const resolvedConversationId = ref?.conversation_id || conversationId;
+  const resolvedConversationName = ref?.conversation_name || conversationId;
+  const conversationReference = ref
+    ? {
+        bot: { id: ref.bot_id, name: ref.bot_name },
+        conversation: { id: ref.conversation_id, isGroup: true, tenantId: ref.tenant_id },
+        serviceUrl: ref.service_url,
+        channelId: 'msteams',
+        locale: 'en-US',
+      }
+    : buildFallbackConversationReference(conversationId);
+  if (!ref) {
+    console.warn(`⚠️ Conversation ref missing for ${conversationId}; using proactive fallback reference for task card`);
+  }
 
   // ── Build task card text ──────────────────────────────────────────────────
+  const normalizeBulletLines = (value = '') =>
+    String(value || '')
+      .split(/\n+|(?=•\s)|(?=-\s)/g)
+      .map((line) => line.replace(/^[•-]\s*/, '').trim())
+      .filter(Boolean);
+
+  const uniqueBullets = (values = []) => {
+    const seen = new Set();
+    return values.filter((value) => {
+      const key = String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  };
+
+  const insightBullets = uniqueBullets(mediaInsights.map((item) => String(item || '').replace(/^🖼️\s*/, '').trim()));
+  const detailBullets = uniqueBullets(
+    normalizeBulletLines(description).map((item) => String(item || '').replace(/^🖼️\s*/, '').trim())
+  ).filter((item) => {
+    const normalized = String(item || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    return !insightBullets.some((insight) => insight.replace(/\s+/g, ' ').trim().toLowerCase() === normalized);
+  });
+  const fileBullets = uniqueBullets(files);
+  const linkBullets = uniqueBullets(links);
+
   const lines = [
     `📌 **New Task from ${groupName}**`,
-     ``,
+    ``,
     `─────────────────────`,
-     ``,
-    `**Task:** ${task}`,
+    ``,
+    `**Task :**`,
+    `• ${task}`,
   ];
   const normalizedTask = String(task || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const normalizedDescription = String(description || '').replace(/\s+/g, ' ').trim().toLowerCase();
   const shouldShowDescription = !!description && normalizedDescription && normalizedDescription !== normalizedTask;
   if (shouldShowDescription) {
-  lines.push(``);
-  lines.push(description);
+    lines.push(``);
+    lines.push(`**Details :**`);
+    detailBullets.forEach((item) => lines.push(`• ${item}`));
+    lines.push(`<br>`);
   }
-  if (Array.isArray(mediaInsights) && mediaInsights.length > 0) {
+  if (insightBullets.length > 0) {
     lines.push(``);
     lines.push(`🖼️ **Media Insights:**`);
-    mediaInsights.forEach((m) => lines.push(`• ${m}`));
+    insightBullets.forEach((m) => lines.push(`• ${m}`));
   }
 
-  if (files.length > 0) lines.push(`📎 Files: ${files.join(', ')}`);
-  if (links.length > 0) {
+  if (fileBullets.length > 0) {
+    lines.push(``);
+    lines.push(`📎 **Files**`);
+    fileBullets.forEach((file) => lines.push(`• ${file}`));
+  }
+  if (linkBullets.length > 0) {
+    lines.push(``);
     lines.push(`🔗 Links:`);
-    links.forEach(l => lines.push(`   ${l}`));
+    linkBullets.forEach((l) => lines.push(`• ${l}`));
   }
 
   let cardActivityId = null;
@@ -246,15 +313,15 @@ export async function sendTaskCardToTeams(conversationId, { task, description, s
     });
   } catch (err) {
     if (isRosterError(err)) {
-      throw new Error(`Bot is not in Teams chat roster: ${ref.conversation_id}`);
+      throw new Error(`Bot is not in Teams chat roster: ${resolvedConversationId}`);
     }
     throw err;
   }
   if (!cardActivityId) {
-    throw new Error(`Teams task card send failed (no activity id): ${ref.conversation_id}`);
+    throw new Error(`Teams task card send failed (no activity id): ${resolvedConversationId}`);
   }
 
-  console.log(`✅ Task card sent to: ${ref.conversation_name}`);
+  console.log(`✅ Task card sent to: ${resolvedConversationName}`);
 
   // ── Step 2: Send each image as attachment ─────────────────────────────────
   for (const imageUrl of mediaUrls) {
@@ -293,7 +360,7 @@ export async function sendTaskCardToTeams(conversationId, { task, description, s
       });
 
       if (!imageActivityId) {
-        throw new Error(`Teams image send failed (no activity id): ${ref.conversation_id}`);
+        throw new Error(`Teams image send failed (no activity id): ${resolvedConversationId}`);
       }
 
       console.log(`✅ Image sent: ${filename}`);
