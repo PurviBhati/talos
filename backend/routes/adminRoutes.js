@@ -14,7 +14,12 @@ const router = express.Router();
 router.use(requireTenant);
 const TEAMS_FILTER_BY_MAPPING = String(process.env.TEAMS_FILTER_BY_MAPPING || "true").toLowerCase() !== "false";
 const draftsCache = new Map();
-const DRAFTS_CACHE_TTL_MS = Number(process.env.DRAFTS_CACHE_TTL_MS || 15000);
+const DEFAULT_DRAFTS_CACHE_TTL_MS = process.env.NODE_ENV === "development" ? 0 : 15000;
+const DRAFTS_CACHE_TTL_MS = Number(process.env.DRAFTS_CACHE_TTL_MS || DEFAULT_DRAFTS_CACHE_TTL_MS);
+
+function invalidateDraftsCache(tenantId) {
+  draftsCache.delete(`${tenantId || "default"}:drafts`);
+}
 
 async function getAllowedTeamsChatIds(tenantId) {
   const monitored = (process.env.MONITORED_CHAT_IDS || "")
@@ -281,6 +286,7 @@ router.post("/approve/:id", async (req, res) => {
         [id, platform || "slack", finalContent, tenantId]
       );
     }
+    invalidateDraftsCache(tenantId);
 
     return ok(res, { sent: true, platform, source_type: source_type || 'teams' }, { message: "Approved" });
   } catch (error) {
@@ -296,6 +302,7 @@ router.post("/ignore/:id", async (req, res) => {
     const id = parseInt(req.params.id);
     if (!id || isNaN(id)) return fail(res, 400, "Valid ID is required");
     await query("UPDATE teams_messages SET approval_status = 'ignored' WHERE id = $1 AND tenant_id = $2", [id, tenantId]);
+    invalidateDraftsCache(tenantId);
     return ok(res, { id, ignored: true }, { message: "Ignored" });
   } catch (error) {
     return fail(res, 500, error.message);
@@ -394,6 +401,7 @@ router.patch("/drafts/:id", async (req, res) => {
     const { content } = req.body;
     if (!id || isNaN(id)) return res.status(400).json({ error: "Valid ID is required" });
     await query("UPDATE teams_messages SET approved_draft = $1 WHERE id = $2 AND tenant_id = $3", [content, id, tenantId]);
+    invalidateDraftsCache(tenantId);
     return res.status(200).json({ message: "Draft updated" });
   } catch (error) {
     return res.status(500).json({ error: error.message });

@@ -450,6 +450,19 @@ app.listen(PORT, async () => {
     console.log("DB migrations disabled by DB_MIGRATIONS_ENABLED=false");
   }
 
+  // Graph subscriptions first so the public webhook is exercised while the server is idle;
+  // avoids Microsoft validation timeouts caused by starting heavy jobs before subscribe.
+  if (isFeatureEnabled("TEAMS_SUBSCRIPTIONS_ENABLED")) {
+    try {
+      await subscribeToAll();
+      startRenewalIntervalStatus();
+    } catch (err) {
+      console.error("Failed to setup subscriptions:", err.message);
+    }
+  } else {
+    console.log("Teams subscriptions disabled by TEAMS_SUBSCRIPTIONS_ENABLED=false");
+  }
+
   if (isFeatureEnabled("MESSAGE_CLEANUP_ENABLED")) {
     startCleanupJob();
   } else {
@@ -490,17 +503,6 @@ app.listen(PORT, async () => {
     startTaskReminderService();
   } else {
     console.log("Task reminder service disabled by TASK_REMINDERS_ENABLED=false");
-  }
-
-  if (isFeatureEnabled("TEAMS_SUBSCRIPTIONS_ENABLED")) {
-    try {
-      await subscribeToAll();
-      startRenewalIntervalStatus();
-    } catch (err) {
-      console.error("Failed to setup subscriptions:", err.message);
-    }
-  } else {
-    console.log("Teams subscriptions disabled by TEAMS_SUBSCRIPTIONS_ENABLED=false");
   }
 
   if (isFeatureEnabled("REANALYZE_MESSAGES_ENABLED")) {

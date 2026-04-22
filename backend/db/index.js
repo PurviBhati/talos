@@ -106,9 +106,9 @@ if (!allowLocalDb && isLocalConnection(databaseUrl)) {
 }
 
 const normalizedDatabaseUrl = normalizeConnectionString(databaseUrl);
-const poolMax = envInt('PG_POOL_MAX', 15);
+const poolMax = envInt('PG_POOL_MAX', 8);
 const idleTimeoutMs = envInt('PG_IDLE_TIMEOUT_MS', 20000);
-const connectionTimeoutMs = envInt('PG_CONNECTION_TIMEOUT_MS', 20000);
+const connectionTimeoutMs = envInt('PG_CONNECTION_TIMEOUT_MS', 45000);
 const maxUses = envInt('PG_MAX_USES', 2000);
 
 const pool = new Pool({
@@ -128,6 +128,8 @@ const OUTAGE_BACKOFF_MS = envInt('PG_OUTAGE_BACKOFF_MS', 12000);
 let lastPoolErrorSignature = '';
 let lastPoolErrorAt = 0;
 const POOL_ERROR_LOG_COOLDOWN_MS = envInt('PG_POOL_ERROR_LOG_COOLDOWN_MS', 60000);
+let lastTransientWarnAt = 0;
+const TRANSIENT_WARN_COOLDOWN_MS = envInt('PG_TRANSIENT_WARN_COOLDOWN_MS', 20000);
 
 pool.on('error', (err) => {
   const sig = `${String(err?.code || '')}:${formatDbError(err).slice(0, 120)}`;
@@ -150,9 +152,9 @@ export async function query(text, params, options = {}) {
     throw err;
   }
 
-  const retries = Number.isInteger(options.retries) ? options.retries : envInt('PG_QUERY_RETRIES', 6);
-  const retryDelayMs = Number.isInteger(options.retryDelayMs) ? options.retryDelayMs : envInt('PG_RETRY_BASE_DELAY_MS', 400);
-  const retryMaxDelayMs = envInt('PG_RETRY_MAX_DELAY_MS', 8000);
+  const retries = Number.isInteger(options.retries) ? options.retries : envInt('PG_QUERY_RETRIES', 8);
+  const retryDelayMs = Number.isInteger(options.retryDelayMs) ? options.retryDelayMs : envInt('PG_RETRY_BASE_DELAY_MS', 700);
+  const retryMaxDelayMs = envInt('PG_RETRY_MAX_DELAY_MS', 12000);
   let lastErr;
 
   let firstTransientLogged = false;
@@ -174,7 +176,11 @@ export async function query(text, params, options = {}) {
       const delay = Math.min(expo + jitter, retryMaxDelayMs);
       const verbose = envInt('PG_VERBOSE_RETRY_LOG', 0) === 1;
       if (!firstTransientLogged) {
-        console.warn(`PostgreSQL transient error (will retry up to ${retries} more times): ${formatDbError(err)}`);
+        const now = Date.now();
+        if (now - lastTransientWarnAt >= TRANSIENT_WARN_COOLDOWN_MS) {
+          console.warn(`PostgreSQL transient error (will retry up to ${retries} more times): ${formatDbError(err)}`);
+          lastTransientWarnAt = now;
+        }
         firstTransientLogged = true;
       } else if (verbose) {
         console.warn(`PostgreSQL query retry ${attempt + 1}/${retries}: ${formatDbError(err)}`);

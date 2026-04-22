@@ -106,9 +106,12 @@ export async function sendToGroupChat(conversationId, message, options = {}) {
     });
   } catch (err) {
     if (isRosterError(err)) {
-      throw new Error(`Bot is not in Teams chat roster: ${resolvedConversationId}`);
+      console.warn(`⚠️ Bot not in roster for ${resolvedConversationId}; falling back to Graph chat send`);
+      const graph = await sendToChatViaGraph(resolvedConversationId, message);
+      activityId = graph?.activityId || null;
+    } else {
+      throw err;
     }
-    throw err;
   }
 
   if (!activityId) {
@@ -193,9 +196,13 @@ export async function sendImageToGroupChat(conversationId, imageUrl, caption, op
     });
   } catch (err) {
     if (isRosterError(err)) {
-      throw new Error(`Bot is not in Teams chat roster: ${resolvedConversationId}`);
+      console.warn(`⚠️ Bot not in roster for ${resolvedConversationId}; falling back to Graph text+image-link send`);
+      const fallbackMessage = `${caption || "Image"}\n${publicUrl}`;
+      const graph = await sendToChatViaGraph(resolvedConversationId, fallbackMessage);
+      sentActivityId = graph?.activityId || null;
+    } else {
+      throw err;
     }
-    throw err;
   }
 
   if (!sentActivityId) {
@@ -313,9 +320,12 @@ export async function sendTaskCardToTeams(conversationId, { task, description, s
     });
   } catch (err) {
     if (isRosterError(err)) {
-      throw new Error(`Bot is not in Teams chat roster: ${resolvedConversationId}`);
+      console.warn(`⚠️ Bot not in roster for ${resolvedConversationId}; falling back to Graph task send`);
+      const graph = await sendToChatViaGraph(resolvedConversationId, lines.join('\n'));
+      cardActivityId = graph?.activityId || null;
+    } else {
+      throw err;
     }
-    throw err;
   }
   if (!cardActivityId) {
     throw new Error(`Teams task card send failed (no activity id): ${resolvedConversationId}`);
@@ -350,14 +360,24 @@ export async function sendTaskCardToTeams(conversationId, { task, description, s
       }
 
       let imageActivityId = null;
-      await adapter.continueConversation(conversationReference, async (context) => {
-        const sent = await context.sendActivity(MessageFactory.attachment({
-          contentType,
-          contentUrl: publicUrl,
-          name: filename,
-        }));
-        imageActivityId = sent?.id || null;
-      });
+      try {
+        await adapter.continueConversation(conversationReference, async (context) => {
+          const sent = await context.sendActivity(MessageFactory.attachment({
+            contentType,
+            contentUrl: publicUrl,
+            name: filename,
+          }));
+          imageActivityId = sent?.id || null;
+        });
+      } catch (err) {
+        if (isRosterError(err)) {
+          console.warn(`⚠️ Bot not in roster for ${resolvedConversationId}; falling back to Graph image-link send`);
+          const graph = await sendToChatViaGraph(resolvedConversationId, `📎 Image: ${filename}\n${publicUrl}`);
+          imageActivityId = graph?.activityId || null;
+        } else {
+          throw err;
+        }
+      }
 
       if (!imageActivityId) {
         throw new Error(`Teams image send failed (no activity id): ${resolvedConversationId}`);

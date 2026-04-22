@@ -1,7 +1,18 @@
 'use client';
-/* eslint-disable @typescript-eslint/no-explicit-any, react/no-unescaped-entities, react-hooks/set-state-in-effect, @next/next/no-img-element */
+/* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/set-state-in-effect, @next/next/no-img-element */
 
 import { useEffect, useState, useCallback, useRef } from 'react';
+import { useAppStore } from './store/useAppStore';
+import { GovernanceSection as GovernanceSectionView } from './components/GovernanceSection';
+import { TeamsSection as TeamsSectionView } from './components/TeamsSection';
+import { SlackSection as SlackSectionView } from './components/SlackSection';
+import { WhatsAppSection as WhatsAppSectionView } from './components/WhatsAppSection';
+import { SummariesSection as SummariesSectionView } from './components/SummariesSection';
+import { TaskSection as TaskSectionView } from './components/TaskSection';
+import { LinkReadsSection as LinkReadsSectionView } from './components/LinkReadsSection';
+import { ForwardLogSection as ForwardLogSectionView } from './components/ForwardLogSection';
+import { AdminSection as AdminSectionView } from './components/AdminSection';
+import ErrorBoundary from './components/ErrorBoundary';
 
 function normalizeBaseUrl(value?: string | null) {
   return String(value || '').trim().replace(/\/+$/, '');
@@ -108,6 +119,7 @@ const THEMES = {
     border: '#56ac96ff',
     accent: '#10b981', // True Emerald
     text: '#f2fff4',
+    'text-soft': '#d3eee0',
     muted: '#a7c9b3',
     dim: '#91cfb5ff',
     slack: '#ec412eff',
@@ -122,6 +134,7 @@ const THEMES = {
     border: '#00712dff',
     accent: '#059669', // Darker Emerald for readability
     text: '#112b25', // Forest Green
+    'text-soft': '#2e5e4f',
     muted: '#4b7a69',
     dim: '#6a8e83',
     slack: '#ec412eff',
@@ -268,112 +281,6 @@ const ICONS = {
   )
 };
 
-interface Draft {
-  id: number;
-  sender: string;
-  source_type: string;
-  original_body: string;
-  content: string;
-  message_type: string;
-  priority: string;
-  ai_reasoning: string;
-  approval_status: string;
-  suggested_platform: string;
-  files: string;
-  chat_name: string;
-  recipient_slack_id: string;
-  recipient_whatsapp: string;
-  approved_draft: string;
-  created_at: string;
-}
-
-interface TeamsMessage {
-  id: number;
-  sender: string;
-  body: string;
-  timestamp: string;
-  source_type: string;
-  source_id: string;
-  files: string | { name: string; url: string; publicUrl?: string }[];
-  links: string | string[];
-  chat_name?: string;
-  dismissed?: boolean;
-}
-
-interface SlackMessage {
-  id: number;
-  sender: string;
-  body: string;
-  timestamp: string;
-  channel_id: string;
-  channel_name: string;
-  forwarded_to_teams: boolean;
-  dismissed?: boolean;
-  files?: { name: string; url: string; publicUrl?: string }[] | string;
-}
-
-interface WhatsAppMessage {
-  id: number;
-  sender: string;
-  sender_phone: string;
-  body: string;
-  timestamp: string;
-  forwarded_to_teams?: boolean;
-  group_name?: string;
-  dismissed?: boolean;
-  media_urls?: string | string[];
-}
-
-interface TeamsChat {
-  id: string;
-  name: string;
-}
-
-interface WAGroup {
-  id: string;
-  name: string;
-}
-
-interface ChannelSummary {
-  channel_id: string;
-  source: string;
-  channel_name: string;
-  summary_text: string;
-  message_count: number;
-  last_updated: string;
-  image_urls?: string[];
-}
-
-interface ForwardLog {
-  id: number;
-  source: string;
-  destination: string;
-  source_channel: string;
-  dest_channel: string;
-  message_preview: string;
-  status: string;
-  error_reason: string | null;
-  task_id: number | null;
-  forwarded_at: string;
-  ai_category?: string;
-  ai_reason?: string;
-  is_batched?: boolean;
-  media_urls?: string | string[];
-}
-
-interface LinkRead {
-  id: number;
-  source: string;
-  source_message_id?: number;
-  platform_label?: string;
-  sender?: string;
-  sender_handle?: string;
-  comment_body?: string;
-  url: string;
-  read_content?: string;
-  created_at: string;
-}
-
 // ─── Shared Components & Types ───────────────────────────────────────────────
 function LinkPreview({ url }: { url: string }) {
   const [data, setData] = useState<any>(null);
@@ -437,19 +344,6 @@ function getHourLabel(iso: string) {
 
   const hours = d.getHours();
   return prefix + (hours < 10 ? '0' + hours : hours) + ':00';
-}
-
-interface Task {
-  id: number;
-  source: string;
-  client_name: string;
-  platform_label: string;
-  body: string;
-  links: string | string[];
-  images: string | string[];
-  status: string;
-  created_at: string;
-  teams_task_id?: string;
 }
 
 function clean(h: string) {
@@ -657,2040 +551,184 @@ function Dropdown({ label, icon, color, options, onSelect, disabled }: {
 
 // ─── AI Governance Section ─────────────────────────────────────────────────────
 function GovernanceSection() {
-  const [drafts, setDrafts] = useState<Draft[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-  const [localDrafts, setLocalDrafts] = useState<Record<number, string>>({});
-  const [savingId, setSavingId] = useState<number | null>(null);
-  const [waGroups, setWaGroups] = useState<WAGroup[]>([]);
-  const [sending, setSending] = useState<Set<number>>(new Set());
-  const activeFilter: 'all' | 'slack' | 'whatsapp' | 'high' = 'all';
-  const approvingRef = useRef<Set<string>>(new Set());
-
-  const fetchDrafts = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await apiFetchJson<Draft[]>(`${API}/api/messages/drafts`, { headers: authHeaders() });
-      setDrafts(Array.isArray(data) ? data : []);
-    } catch (err: any) {
-      console.error('[Governance drafts]', err);
-      setError(err?.message || 'Failed to load drafts');
-      setDrafts([]);
-    }
-    finally { setLoading(false); }
-  }, []);
-
-  const fetchWAGroups = useCallback(async () => {
-    try {
-      const data = await apiFetchJson<WAGroup[]>(`${API}/api/messages/whatsapp-groups`, { headers: authHeaders() });
-      setWaGroups(Array.isArray(data) ? data : []);
-    } catch { }
-  }, []);
-
-  useEffect(() => {
-    fetchDrafts();
-    fetchWAGroups();
-    const t = setInterval(fetchDrafts, 600000);
-    return () => clearInterval(t);
-  }, [fetchDrafts, fetchWAGroups]);
-
-  async function handleApprove(draft: Draft, platform: 'slack' | 'whatsapp', target: string) {
-    const lockKey = `${draft.id}-${platform}-${target}`;
-    if (approvingRef.current.has(lockKey)) return;
-    approvingRef.current.add(lockKey);
-
-    const text = localDrafts[draft.id] ?? (draft.approved_draft || draft.content);
-    setSending(p => new Set([...p, draft.id]));
-    try {
-      await apiFetchJson(`${API}/api/messages/approve/${draft.id}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
-          platform,
-          editedContent: text,
-          source_type: draft.source_type,
-          slackChannel: platform === 'slack' ? target : undefined,
-          whatsappGroup: platform === 'whatsapp' ? target : undefined,
-        }),
-      });
-      fetchDrafts();
-    } catch (err) { console.error('[Approve]', err); }
-    finally {
-      setSending(p => { const n = new Set(p); n.delete(draft.id); return n; });
-      setTimeout(() => approvingRef.current.delete(lockKey), 3000);
-    }
-  }
-
-  async function handleSaveDraft(id: number) {
-    const content = localDrafts[id];
-    if (!content) return;
-    setSavingId(id);
-    try {
-      await fetch(`${API}/api/messages/drafts/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ content })
-      });
-      setDrafts(prev => prev.map(d => d.id === id ? { ...d, approved_draft: content } : d));
-      // Optional: Clear local state so Save button hides
-      setLocalDrafts(p => { const n = { ...p }; delete n[id]; return n; });
-    } catch (err) { console.error('[Save Draft]', err); }
-    finally { setSavingId(null); }
-  }
-
-  async function handleIgnore(id: number) {
-    await apiFetchJson(`${API}/api/messages/ignore/${id}`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() } });
-    setDrafts(prev => prev.filter(d => d.id !== id));
-  }
-
-  const pendingRaw = drafts.filter(d => !d.approval_status || d.approval_status === 'waiting');
-  const approvedCount = drafts.filter(d => d.approval_status === 'approved').length;
-
-  const pending = pendingRaw.filter(d => {
-    if (activeFilter === 'all') return true;
-    if (activeFilter === 'slack') return d.source_type === 'slack';
-    if (activeFilter === 'whatsapp') return d.source_type === 'whatsapp';
-    if (activeFilter === 'high') return d.priority === 'high';
-    return true;
-  });
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <SectionHeader title="Talos" sub="Automated Intelligence Auditor" onRefresh={fetchDrafts} loading={loading} />
-
-      {/* Live Command Center Row */}
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 20, background: `${C.sidebar}44`, border: `1px solid ${C.border}66`, padding: '12px 18px', borderRadius: 12, marginBottom: 20, flexWrap: 'wrap' }}>
-
-        {/* Left: Engine Status */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <div style={{ width: 8, height: 8, borderRadius: '50%', background: C.accent, boxShadow: `0 0 10px ${C.accent}`, animation: 'pulse 2s infinite' }} />
-            <span style={{ fontSize: 11, fontWeight: 800, color: C.text, textTransform: 'uppercase', letterSpacing: '0.05em' }}>Talos Live</span>
-          </div>
-          <div style={{ width: 1, height: 16, background: C.border }} />
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
-            {[
-              { icon: ICONS.slack(14, C.slack), label: 'Slack' },
-              { icon: ICONS.whatsapp(14, C.wa), label: 'WA' },
-              { icon: ICONS.teams(14, C.teams), label: 'Teams' }
-            ].map(p => (
-              <div key={p.label} style={{ display: 'flex', alignItems: 'center', gap: 6, opacity: 0.8 }} title={`${p.label} Connected`}>
-                {p.icon}
-                <div style={{ width: 4, height: 4, borderRadius: '50%', background: '#10b981' }} />
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Right: Growth Stats */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 16, borderLeft: `1px solid ${C.border}66`, paddingLeft: 16, marginLeft: 'auto' }}>
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 16, fontWeight: 800, color: C.text }}>{approvedCount}</div>
-            <div style={{ fontSize: 9, fontWeight: 700, color: C.dim, textTransform: 'uppercase' }}>Approved Today</div>
-          </div>
-          <div style={{ textAlign: 'right' }}>
-            <div style={{ fontSize: 16, fontWeight: 800, color: C.accent }}>{pendingRaw.length}</div>
-            <div style={{ fontSize: 9, fontWeight: 700, color: C.dim, textTransform: 'uppercase' }}>Queue</div>
-          </div>
-        </div>
-      </div>
-      {loading ? (
-        <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading...</div>
-      ) : error ? (
-        <EmptyState message={error} type="error" />
-      ) : pending.length === 0 ? (
-        <EmptyState message="No pending AI drafts" />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {pending.map(draft => {
-            const isSending = sending.has(draft.id);
-            const files = parseFiles(draft.files);
-            return (
-              <div key={draft.id} className="card-wrapper" style={{ background: C.card, border: `4px solid ${C.border}`, borderRadius: 14, padding: 20, position: 'relative', zIndex: 0 }}>
-                <button onClick={() => handleIgnore(draft.id)}
-                  style={{ position: 'absolute', top: 14, right: 14, background: '#ef444420', border: '1px solid #ef444440', color: '#ef4444', borderRadius: 6, width: 26, height: 26, cursor: 'pointer', fontSize: 13, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>✕</button>
-                <div className="gov-card-head" style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 14, paddingRight: 36 }}>
-                  <Avatar name={draft.sender} />
-                  <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ fontSize: 14, fontWeight: 700, color: C.text }}>{draft.sender}</div>
-                    <div style={{ fontSize: 11, color: C.dim, marginTop: 2, display: 'flex', alignItems: 'center', gap: 6 }}>
-                      {ICONS.teams(12, C.teams)} {draft.chat_name || 'Teams'} · <span style={{ textTransform: 'capitalize' }}>{draft.source_type}</span>
-                    </div>
-                  </div>
-                  <div className="gov-card-meta" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4, flexShrink: 0 }}>
-                    <span style={{ fontSize: 11, color: C.dim }}>{formatDate(draft.created_at)}</span>
-                    {draft.priority && (
-                      <span style={{ fontSize: 10, fontWeight: 700, background: draft.priority === 'high' ? '#ef444422' : `${C.accent}22`, color: draft.priority === 'high' ? '#ef4444' : C.accent, border: `1px solid ${draft.priority === 'high' ? '#ef444444' : `${C.accent}44`}`, padding: '1px 7px', borderRadius: 4, textTransform: 'uppercase' }}>{draft.priority}</span>
-                    )}
-                  </div>
-                </div>
-                {draft.original_body && draft.original_body !== draft.content && (
-                  <div style={{ fontSize: 13, color: C.dim, lineHeight: 1.6, marginBottom: 12, fontStyle: 'italic', whiteSpace: 'pre-wrap', paddingRight: 6 }}>"{clean(draft.original_body)}"</div>
-                )}
-                {files.map((f, i) => <FileAttachment key={i} file={f} />)}
-                {draft.ai_reasoning && (
-                  <div style={{ background: `${C.border}33`, border: `1px solid ${C.border}`, borderRadius: 8, padding: '10px 14px', marginBottom: 12, fontSize: 12, color: C.dim, lineHeight: 1.5, display: 'flex', alignItems: 'flex-start', gap: 10, whiteSpace: 'pre-wrap' }}>
-                    <span style={{ marginTop: 2, flexShrink: 0 }}>{ICONS.sparkle(14, C.accent)}</span>
-                    <span style={{ flex: 1 }}>{clean(draft.ai_reasoning)}</span>
-                  </div>
-                )}
-                <textarea
-                  value={localDrafts[draft.id] ?? (draft.approved_draft || clean(draft.content))}
-                  onChange={e => setLocalDrafts(p => ({ ...p, [draft.id]: e.target.value }))}
-                  onInput={e => {
-                    const el = e.currentTarget;
-                    el.style.height = 'auto';
-                    el.style.height = el.scrollHeight + 'px';
-                  }}
-                  ref={el => {
-                    if (el && !el.style.height) {
-                      el.style.height = 'auto';
-                      el.style.height = el.scrollHeight + 'px';
-                    }
-                  }}
-                  style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '12px 16px', color: C.text, fontSize: 13, resize: 'none', marginBottom: 16, minHeight: 44, maxHeight: 400, overflow: 'hidden', fontFamily: 'inherit', lineHeight: 1.6, boxSizing: 'border-box', outline: 'none', boxShadow: 'inset 0 2px 4px rgba(0,0,0,0.1)' }} />
-
-                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', alignItems: 'center' }}>
-                  <Dropdown label="Forward to Slack" icon={ICONS.slack(14, C.slack)} color={C.slack} options={SLACK_CHANNELS} onSelect={(id) => handleApprove(draft, 'slack', id)} disabled={isSending} />
-                  <Dropdown label="Forward to WhatsApp" icon={ICONS.whatsapp(14, C.wa)} color={C.wa} options={waGroups.map(g => ({ id: g.name, name: g.name }))} onSelect={(_, name) => handleApprove(draft, 'whatsapp', name)} disabled={isSending} />
-
-                  {((localDrafts[draft.id] !== undefined) && (localDrafts[draft.id] !== (draft.approved_draft || draft.content))) && (
-                    <div style={{ display: 'flex', gap: 8 }}>
-                      <button onClick={() => handleSaveDraft(draft.id)} disabled={savingId === draft.id}
-                        style={{ background: `${C.accent}22`, color: C.accent, border: `1px solid ${C.accent}44`, padding: '8px 16px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', display: 'flex', alignItems: 'center', gap: 6 }}>
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path><polyline points="17 21 17 13 7 13 7 21"></polyline><polyline points="7 3 7 8 15 8"></polyline></svg>
-                        {savingId === draft.id ? 'Saving...' : 'Save Draft'}
-                      </button>
-                      <button onClick={() => setLocalDrafts(p => { const n = { ...p }; delete n[draft.id]; return n; })}
-                        style={{ background: 'transparent', color: C.dim, border: `1px solid ${C.border}`, padding: '8px 16px', borderRadius: 8, fontSize: 11, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit' }}>
-                        Discard
-                      </button>
-                    </div>
-                  )}
-
-                  {isSending && <span style={{ fontSize: 12, color: C.muted, marginLeft: 'auto' }}>Sending Message...</span>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </div>
+    <GovernanceSectionView
+      C={C}
+      ICONS={ICONS}
+      API={API}
+      SLACK_CHANNELS={SLACK_CHANNELS}
+      SectionHeader={SectionHeader}
+      EmptyState={EmptyState}
+      Dropdown={Dropdown}
+      Avatar={Avatar}
+      FileAttachment={FileAttachment}
+      parseFiles={parseFiles}
+      clean={clean}
+      formatDate={formatDate}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
 
 // ─── Teams Section ─────────────────────────────────────────────────────────────
 function TeamsSection() {
-  const [messages, setMessages] = useState<TeamsMessage[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
-  const [error, setError] = useState('');
-
-  const fetchMessages = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await apiFetchJson<TeamsMessage[]>(`${API}/api/teams/messages/chats`, { headers: authHeaders() });
-      setMessages(Array.isArray(data) ? data : []);
-    } catch (err: any) {
-      console.error('[Teams]', err);
-      setError(err?.message || 'Failed to load Teams messages');
-      setMessages([]);
-    }
-    finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => {
-    fetchMessages();
-    const t = setInterval(fetchMessages, 20000);
-    return () => clearInterval(t);
-  }, [fetchMessages]);
-
-  async function handleDismiss(id: number) {
-    setDismissed(p => new Set([...p, id]));
-    await apiFetchJson(`${API}/api/teams/messages/${id}/dismiss`, { method: 'PATCH', headers: authHeaders() }).catch(() => { });
-  }
-
-  const visible = messages.filter(m => !dismissed.has(m.id) && !m.dismissed);
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <SectionHeader title="Teams Messages" sub="Incoming messages from monitored group chats" onRefresh={fetchMessages} loading={loading} />
-      {loading ? <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading...</div>
-        : error ? <EmptyState message={error} type="error" />
-        : visible.length === 0 ? <EmptyState message="No Teams messages" />
-          : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {(() => {
-                const items: any[] = [];
-                let lastHour = '';
-                visible.forEach(msg => {
-                  const hour = getHourLabel(msg.timestamp);
-                  if (hour !== lastHour) {
-                    items.push(<HourSeparator key={`sep-${msg.id}`} label={hour} />);
-                    lastHour = hour;
-                  }
-                  const files = parseFiles(msg.files);
-                  const links = parseLinks(msg.links);
-                  items.push(
-                    <div key={msg.id} className="card-wrapper" style={{ background: C.card, borderLeft: `4px solid ${C.teams}`, borderRight: `1px solid ${C.border}`, borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, borderRadius: 16, padding: 20, position: 'relative', transition: 'all 0.2s', boxShadow: '0 8px 24px rgba(0,0,0,0.2)', zIndex: 0 }}>
-                      <button onClick={() => handleDismiss(msg.id)}
-                        style={{ position: 'absolute', top: 14, right: 14, background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, opacity: 0.5, transition: 'opacity 0.2s' }}
-                        onMouseEnter={e => e.currentTarget.style.opacity = '1'}
-                        onMouseLeave={e => e.currentTarget.style.opacity = '0.5'}>✕</button>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14, paddingRight: 40 }}>
-                        <Avatar name={msg.sender} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{msg.sender}</div>
-                          <div style={{ fontSize: 11, color: C.teams, marginTop: 3, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6, textShadow: `0 0 10px ${C.teams}55` }}>
-                            {ICONS.teams(12, C.teams)} {msg.chat_name || 'Teams Chat'}
-                          </div>
-                        </div>
-                        <div style={{ fontSize: 11, color: C.dim, fontWeight: 600 }}>{new Date(msg.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}</div>
-                      </div>
-                      {msg.body && (
-                        <div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, whiteSpace: 'pre-wrap', marginBottom: (files.length || links.length) ? 14 : 0 }}>
-                          {clean(msg.body)}
-                          {(() => {
-                            const urlMatch = msg.body.match(/https?:\/\/[^\s<>"{}|\\^`[\]]+/);
-                            if (urlMatch) {
-                              const decodedUrl = urlMatch[0].replace(/&amp;/g, '&');
-                              return <LinkPreview url={decodedUrl} />;
-                            }
-                            return null;
-                          })()}
-                        </div>
-                      )}
-                      {files.map((f, i) => <FileAttachment key={i} file={f} />)}
-                      {links.length > 0 && (
-                        <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 6 }}>
-                          {links.map((l, i) => (
-                            <a key={i} href={l} target="_blank" rel="noopener noreferrer"
-                              style={{ fontSize: 12, color: C.accent, textDecoration: 'none', opacity: 0.9, fontWeight: 500 }}>{ICONS.link(12, C.accent)} {l}</a>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  );
-                });
-                return items;
-              })()}
-            </div>
-          )}
-    </div>
+    <TeamsSectionView
+      C={C}
+      ICONS={ICONS}
+      API={API}
+      SectionHeader={SectionHeader}
+      EmptyState={EmptyState}
+      Avatar={Avatar}
+      HourSeparator={HourSeparator}
+      LinkPreview={LinkPreview}
+      FileAttachment={FileAttachment}
+      parseFiles={parseFiles}
+      parseLinks={parseLinks}
+      clean={clean}
+      getHourLabel={getHourLabel}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
 
 // ─── Slack Section ─────────────────────────────────────────────────────────────
 function SlackSection() {
-  const [messages, setMessages] = useState<SlackMessage[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
-  const [teamsChats, setTeamsChats] = useState<TeamsChat[]>([]);
-  const [forwarding, setForwarding] = useState<Set<number>>(new Set());
-  const [forwarded, setForwarded] = useState<Set<number>>(new Set());
-  const [editMap, setEditMap] = useState<Record<number, string>>({});
-  const [editingId, setEditingId] = useState<number | null>(null);
-
-  const fetchMessages = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetch(`${API}/api/slack/messages`, { headers: authHeaders() });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      setMessages(Array.isArray(data) ? data : []);
-    } catch (err) { console.error('[Slack]', err); }
-    finally { setLoading(false); }
-  }, []);
-
-  const fetchTeamsChats = useCallback(async () => {
-    try {
-      const r = await fetch(`${API}/api/slack/teams-chats`, { headers: authHeaders() });
-      if (r.ok) { const data = await r.json(); setTeamsChats(Array.isArray(data) ? data : []); }
-    } catch { }
-  }, []);
-
-  useEffect(() => {
-    fetchMessages(); fetchTeamsChats();
-    const t = setInterval(fetchMessages, 20000);
-    return () => clearInterval(t);
-  }, [fetchMessages, fetchTeamsChats]);
-
-  async function handleDismiss(id: number) {
-    setDismissed(p => new Set([...p, id]));
-    await fetch(`${API}/api/dismiss/slack/${id}`, { method: 'POST' }).catch(() => { });
-  }
-
-  async function handleForward(msg: SlackMessage, chatId: string) {
-    setForwarding(p => new Set([...p, msg.id]));
-    const body = editingId === msg.id ? (editMap[msg.id] || msg.body) : msg.body;
-    try {
-      if (body) {
-        await fetch(`${API}/api/slack/forward`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msgId: msg.id, chatId, editedBody: body }) });
-      }
-      const files = parseFiles(msg.files);
-      for (const f of files) {
-        const url = f.publicUrl || f.url;
-        if (url) await fetch(`${API}/api/slack/forward-image`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messageId: msg.id, chatId, publicUrl: url, caption: f.name }) });
-      }
-      setForwarded(p => new Set([...p, msg.id]));
-      setTimeout(() => setDismissed(p => new Set([...p, msg.id])), 1500);
-      setEditingId(null);
-    } catch (err) { console.error('[Slack forward]', err); }
-    finally { setForwarding(p => { const n = new Set(p); n.delete(msg.id); return n; }); }
-  }
-
-  const visible = messages.filter(m => !dismissed.has(m.id) && !m.dismissed);
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <SectionHeader title="Slack Messages" sub="Forward Slack messages to Microsoft Teams" onRefresh={fetchMessages} loading={loading} />
-      {loading ? <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading...</div>
-        : visible.length === 0 ? <EmptyState message="No Slack messages" />
-          : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {(() => {
-                const items: any[] = [];
-                let lastHour = '';
-                visible.forEach(msg => {
-                  const hour = getHourLabel(msg.timestamp);
-                  if (hour !== lastHour) {
-                    items.push(<HourSeparator key={`sep-${msg.id}`} label={hour} />);
-                    lastHour = hour;
-                  }
-                  const isForwarded = forwarded.has(msg.id) || msg.forwarded_to_teams;
-                  const isForwarding = forwarding.has(msg.id);
-                  const isEditing = editingId === msg.id;
-                  const files = parseFiles(msg.files);
-                  items.push(
-                    <div key={msg.id} className="card-wrapper" style={{ background: C.card, borderLeft: `4px solid ${C.slack}`, borderRight: `1px solid ${C.border}`, borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, borderRadius: 16, padding: 20, position: 'relative', boxShadow: '0 8px 24px rgba(0,0,0,0.2)', zIndex: 0 }}>
-                      <button onClick={() => handleDismiss(msg.id)}
-                        style={{ position: 'absolute', top: 14, right: 14, background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, opacity: 0.5 }}>✕</button>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14, paddingRight: 40 }}>
-                        <Avatar name={msg.sender} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{msg.sender}</div>
-                          <div style={{ fontSize: 11, color: C.slack, marginTop: 3, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
-                            {ICONS.slack(12, C.slack)} {msg.channel_name || msg.channel_id}
-                          </div>
-                        </div>
-                        <div style={{ fontSize: 11, color: C.dim, fontWeight: 600 }}>{new Date(msg.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}</div>
-                      </div>
-                      {isEditing ? (
-                        <textarea value={editMap[msg.id] ?? msg.body} onChange={e => setEditMap(p => ({ ...p, [msg.id]: e.target.value }))}
-                          style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '12px 16px', color: C.text, fontSize: 13, resize: 'vertical', marginBottom: 12, minHeight: 80, fontFamily: 'inherit', boxSizing: 'border-box', outline: 'none' }} />
-                      ) : msg.body ? (
-                        <div style={{ fontSize: 13, color: C.text, lineHeight: 1.4, marginBottom: files.length ? 12 : 0 }}>
-                          {clean(msg.body)}
-                          {(() => {
-                            const urlMatch = msg.body.match(/https?:\/\/[^\s<>"{}|\\^`[\]]+/);
-                            if (urlMatch) return <LinkPreview url={urlMatch[0]} />;
-                            return null;
-                          })()}
-                        </div>
-                      ) : null}
-                      {files.map((f, i) => <FileAttachment key={i} file={f} />)}
-                      <div style={{ display: 'flex', gap: 14, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-                        {isForwarded ? <span style={{ fontSize: 12, color: C.accent, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em' }}>✓ Forwarded</span> : (
-                          <>
-                            <Dropdown label={isForwarding ? 'Forwarding...' : 'Forward to Teams'} icon={ICONS.teams(14, '#fff')} color={C.teams} options={teamsChats.map(c => ({ id: c.id, name: c.name }))} onSelect={(id) => handleForward(msg, id)} disabled={isForwarding} />
-                            <button onClick={() => isEditing ? setEditingId(null) : (setEditingId(msg.id), setEditMap(p => ({ ...p, [msg.id]: p[msg.id] ?? msg.body })))}
-                              style={{ background: 'transparent', border: 'none', color: '#f59e0b', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700, padding: '6px 0', borderBottom: '1.5px dashed #f59e0b', opacity: 0.8, transition: 'opacity 0.2s' }}
-                              onMouseEnter={e => e.currentTarget.style.opacity = '1'}
-                              onMouseLeave={e => e.currentTarget.style.opacity = '0.8'}>
-                              {isEditing ? 'Cancel Edit' : 'Edit Message'}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                });
-                return items;
-              })()}
-            </div>
-          )}
-    </div>
+    <SlackSectionView
+      C={C}
+      ICONS={ICONS}
+      API={API}
+      SectionHeader={SectionHeader}
+      EmptyState={EmptyState}
+      Avatar={Avatar}
+      HourSeparator={HourSeparator}
+      LinkPreview={LinkPreview}
+      FileAttachment={FileAttachment}
+      Dropdown={Dropdown}
+      parseFiles={parseFiles}
+      clean={clean}
+      getHourLabel={getHourLabel}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
 
 // ─── WhatsApp Section ──────────────────────────────────────────────────────────
 function WhatsAppSection() {
-  const [messages, setMessages] = useState<WhatsAppMessage[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [dismissed, setDismissed] = useState<Set<number>>(new Set());
-  const [teamsChats, setTeamsChats] = useState<TeamsChat[]>([]);
-  const [forwarding, setForwarding] = useState<Set<number>>(new Set());
-  const [forwarded, setForwarded] = useState<Set<number>>(new Set());
-  const [editMap, setEditMap] = useState<Record<number, string>>({});
-  const [editingId, setEditingId] = useState<number | null>(null);
-  const [error, setError] = useState('');
-
-  const fetchMessages = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await apiFetchJson<WhatsAppMessage[]>(`${API}/api/whatsapp/messages`, { headers: authHeaders() });
-      setMessages(Array.isArray(data) ? data : []);
-    } catch (err: any) {
-      console.error('[WhatsApp]', err);
-      setError(err?.message || 'Failed to load WhatsApp messages');
-      setMessages([]);
-    }
-    finally { setLoading(false); }
-  }, []);
-
-  const fetchTeamsChats = useCallback(async () => {
-    try {
-      const data = await apiFetchJson<TeamsChat[]>(`${API}/api/slack/teams-chats`, { headers: authHeaders() });
-      setTeamsChats(Array.isArray(data) ? data : []);
-    } catch { }
-  }, []);
-
-  useEffect(() => {
-    fetchMessages(); fetchTeamsChats();
-    const t = setInterval(fetchMessages, 600000);
-    return () => clearInterval(t);
-  }, [fetchMessages, fetchTeamsChats]);
-
-  async function handleDismiss(id: number) {
-    setDismissed(p => new Set([...p, id]));
-    await fetch(`${API}/api/dismiss/whatsapp/${id}`, { method: 'POST' }).catch(() => { });
-  }
-
-  async function handleForward(msg: WhatsAppMessage, chatId: string) {
-    setForwarding(p => new Set([...p, msg.id]));
-    const body = editingId === msg.id ? (editMap[msg.id] || msg.body) : msg.body;
-    try {
-      if (body) await apiFetchJson(`${API}/api/whatsapp/forward`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ msgId: msg.id, chatId, editedBody: body }) });
-      const mediaUrls = parseLinks(msg.media_urls);
-      for (const url of mediaUrls) {
-        await apiFetchJson(`${API}/api/whatsapp/forward-image`, { method: 'POST', headers: { 'Content-Type': 'application/json', ...authHeaders() }, body: JSON.stringify({ messageId: msg.id, chatId, mediaUrl: url }) });
-      }
-      setForwarded(p => new Set([...p, msg.id]));
-      setTimeout(() => setDismissed(p => new Set([...p, msg.id])), 1500);
-      setEditingId(null);
-    } catch (err) { console.error('[WA forward]', err); }
-    finally { setForwarding(p => { const n = new Set(p); n.delete(msg.id); return n; }); }
-  }
-
-  const visible = messages.filter(m => !dismissed.has(m.id) && !m.dismissed);
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <SectionHeader title="WhatsApp Messages" sub="Forward WhatsApp messages to Microsoft Teams" onRefresh={fetchMessages} loading={loading} />
-      {loading ? <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading...</div>
-        : error ? <EmptyState message={error} type="error" />
-        : visible.length === 0 ? <EmptyState message="No WhatsApp messages" />
-          : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {(() => {
-                const items: any[] = [];
-                let lastHour = '';
-                visible.forEach(msg => {
-                  const hour = getHourLabel(msg.timestamp);
-                  if (hour !== lastHour) {
-                    items.push(<HourSeparator key={`sep-${msg.id}`} label={hour} />);
-                    lastHour = hour;
-                  }
-                  const isForwarded = forwarded.has(msg.id) || msg.forwarded_to_teams;
-                  const isForwarding = forwarding.has(msg.id);
-                  const isEditing = editingId === msg.id;
-                  const mediaUrls = parseLinks(msg.media_urls);
-                  items.push(
-                    <div key={msg.id} className="card-wrapper" style={{ background: C.card, borderLeft: `4px solid ${C.wa}`, borderRight: `1px solid ${C.border}`, borderTop: `1px solid ${C.border}`, borderBottom: `1px solid ${C.border}`, borderRadius: 16, padding: 20, position: 'relative', boxShadow: '0 8px 24px rgba(0,0,0,0.2)', zIndex: 0 }}>
-                      <button onClick={() => handleDismiss(msg.id)}
-                        style={{ position: 'absolute', top: 14, right: 14, background: 'transparent', border: 'none', color: '#ef4444', cursor: 'pointer', fontSize: 18, opacity: 0.5 }}>✕</button>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 14, paddingRight: 40 }}>
-                        <Avatar name={msg.sender} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{msg.sender || 'Unknown'}</div>
-                          <div style={{ fontSize: 11, color: C.wa, marginTop: 3, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 6 }}>
-                            {ICONS.whatsapp(12, C.wa)} {msg.sender}{msg.group_name ? ` · ${msg.group_name}` : ''}
-                          </div>
-                        </div>
-                        <div style={{ fontSize: 11, color: C.dim, fontWeight: 600 }}>{new Date(msg.timestamp).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true })}</div>
-                      </div>
-                      {isEditing ? (
-                        <textarea value={editMap[msg.id] ?? msg.body} onChange={e => setEditMap(p => ({ ...p, [msg.id]: e.target.value }))}
-                          style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '12px 16px', color: C.text, fontSize: 13, resize: 'vertical', marginBottom: 12, minHeight: 80, fontFamily: 'inherit', boxSizing: 'border-box', outline: 'none' }} />
-                      ) : msg.body ? (
-                        <div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, marginBottom: mediaUrls.length ? 10 : 8 }}>
-                          {clean(msg.body)}
-                          {(() => {
-                            const urlMatch = msg.body.match(/https?:\/\/[^\s<>"{}|\\^`[\]]+/);
-                            if (urlMatch) return <LinkPreview url={urlMatch[0]} />;
-                            return null;
-                          })()}
-                        </div>
-                      ) : null}
-                      {mediaUrls.map((url, i) => (
-                        isImageFile('', url)
-                          ? <img key={i} src={url} alt="media" style={{ maxWidth: '100%', maxHeight: 180, borderRadius: 10, display: 'block', marginBottom: 10, border: `1px solid ${C.border}44` }} onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }} />
-                          : <a key={i} href={url} target="_blank" rel="noopener noreferrer" style={{ color: C.accent, fontSize: 12, display: 'block', marginBottom: 8, fontWeight: 600 }}>{ICONS.link(12, C.accent)} View Attachment</a>
-                      ))}
-                      <div style={{ display: 'flex', gap: 14, marginTop: 14, flexWrap: 'wrap', alignItems: 'center' }}>
-                        {isForwarded ? <span style={{ fontSize: 12, color: C.accent, fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.04em' }}>✓ Forwarded</span> : (
-                          <>
-                            <Dropdown label={isForwarding ? 'Forwarding...' : 'Forward to Teams'} icon={ICONS.teams(14, '#fff')} color={C.teams} options={teamsChats.map(c => ({ id: c.id, name: c.name }))} onSelect={(id) => handleForward(msg, id)} disabled={isForwarding} />
-                            <button onClick={() => isEditing ? setEditingId(null) : (setEditingId(msg.id), setEditMap(p => ({ ...p, [msg.id]: p[msg.id] ?? msg.body })))}
-                              style={{ background: 'transparent', border: 'none', color: '#f59e0b', fontSize: 12, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700, padding: '6px 0', borderBottom: '1.5px dashed #f59e0b', opacity: 0.8, transition: 'opacity 0.2s' }}
-                              onMouseEnter={e => e.currentTarget.style.opacity = '1'}
-                              onMouseLeave={e => e.currentTarget.style.opacity = '0.8'}>
-                              {isEditing ? 'Cancel Edit' : 'Edit Message'}
-                            </button>
-                          </>
-                        )}
-                      </div>
-                    </div>
-                  );
-                });
-                return items;
-              })()}
-            </div>
-          )}
-    </div>
+    <WhatsAppSectionView
+      C={C}
+      ICONS={ICONS}
+      API={API}
+      SectionHeader={SectionHeader}
+      EmptyState={EmptyState}
+      Avatar={Avatar}
+      HourSeparator={HourSeparator}
+      LinkPreview={LinkPreview}
+      Dropdown={Dropdown}
+      parseLinks={parseLinks}
+      clean={clean}
+      getHourLabel={getHourLabel}
+      isImageFile={isImageFile}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
 
 // ─── Summaries Section ─────────────────────────────────────────────────────────
 function SummariesSection() {
-  const [summaries, setSummaries] = useState<ChannelSummary[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [dismissing, setDismissing] = useState<string | null>(null);
-  const getPythonApiCandidates = useCallback(() => {
-    const configured = process.env.NEXT_PUBLIC_PYTHON_API_URL;
-    if (configured) return [configured];
-    if (typeof window === 'undefined') return ['http://localhost:8000'];
-    const host = window.location.hostname;
-    const primary = `http://${host}:8000`;
-    const localFallback = ['localhost', '127.0.0.1'].includes(host) ? ['http://localhost:8000', 'http://127.0.0.1:8000'] : [];
-    return [primary, ...localFallback];
-  }, []);
-
-  const fetchFromPython = useCallback(async (path: string, init?: RequestInit) => {
-    const candidates = getPythonApiCandidates();
-    let lastError: unknown = null;
-    for (const base of candidates) {
-      try {
-        const response = await fetch(`${base}${path}`, init);
-        return response;
-      } catch (error) {
-        lastError = error;
-      }
-    }
-    throw lastError || new Error('Python API request failed');
-  }, [getPythonApiCandidates]);
-
-  const fetchSummaries = useCallback(async () => {
-    setLoading(true);
-    try {
-      const r = await fetchFromPython('/summaries');
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      const sorted = (data.summaries || []).sort(
-        (a: ChannelSummary, b: ChannelSummary) =>
-          new Date(b.last_updated).getTime() - new Date(a.last_updated).getTime()
-      );
-      setSummaries(sorted);
-    } catch (err) {
-      console.error('[Summaries]', err);
-    } finally {
-      setLoading(false);
-    }
-  }, [fetchFromPython]);
-
-  useEffect(() => { fetchSummaries(); }, [fetchSummaries]);
-
-  const triggerRefresh = async () => {
-    setRefreshing(true);
-    try {
-      await fetchFromPython('/summarize/all', { method: 'POST' });
-      await fetchSummaries();
-    } catch (err) {
-      console.error('[Summarize]', err);
-    } finally {
-      setRefreshing(false);
-    }
-  };
-
-  const dismissSummary = async (source: string, channelId: string) => {
-    const key = `${source}:${channelId}`;
-    setDismissing(key);
-    try {
-      await fetchFromPython(`/summary/${source}/${encodeURIComponent(channelId)}/dismiss`, { method: 'POST' });
-      setSummaries(prev => prev.filter(s => !(s.source === source && s.channel_id === channelId)));
-    } catch (err) {
-      console.error('[Dismiss]', err);
-    } finally {
-      setDismissing(null);
-    }
-  };
-
-  const sourceColor = (s: string) =>
-    s === 'slack' ? C.slack : s === 'whatsapp' ? C.wa : s === 'teams' ? C.teams : C.accent;
-
-  function parseExtraction(text: string) {
-    if (!text || text.trim() === 'NO_ACTION' || text.startsWith('Extraction unavailable'))
-      return { task: null, files: null, links: null, isEmpty: true };
-
-    const taskBlockMatch = text.match(/^TASKS?:\s*([\s\S]*?)(?:\n(?:FILES:|LINKS:)|$)/mi);
-    const rawTask =
-      taskBlockMatch?.[1]?.trim() ||
-      text.match(/^TASK:\s*(.+)$/m)?.[1]?.trim() ||
-      null;
-    const rawFiles = text.match(/^FILES:\s*(.+)$/m)?.[1]?.trim() || null;
-    const rawLinks = text.match(/^LINKS:\s*(.+)$/m)?.[1]?.trim() || null;
-
-    const task = rawTask === 'NO_ACTION' ? null : rawTask;
-    const links = rawLinks === 'NO_ACTION' ? null :
-      (rawLinks?.split(',').map(l => l.trim()).filter(l => /^https?:\/\//.test(l)).join(', '));
-    const files = rawFiles === 'NO_ACTION' ? null :
-      (rawFiles?.split(',').map(f => f.trim()).filter(Boolean).join(', ') || null);
-
-    return { task, files, links, isEmpty: !task && !files && !links };
-  }
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, gap: 10, flexWrap: 'wrap' }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 700, color: C.text }}>Chat Summaries</div>
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>AI-extracted tasks, files & links from recent messages per channel</div>
-        </div>
-        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-          <button onClick={triggerRefresh} disabled={refreshing} style={{ background: `${C.accent}22`, border: `1px solid ${C.accent}44`, color: refreshing ? C.dim : C.accent, padding: '7px 12px', borderRadius: 8, fontSize: 12, cursor: refreshing ? 'not-allowed' : 'pointer' }}>
-            {refreshing ? '⏳ Summarizing...' : '✦ Re-summarize All'}
-          </button>
-          <button onClick={fetchSummaries} disabled={loading} style={{ background: C.card, border: `1px solid ${C.border}`, color: loading ? C.dim : C.muted, padding: '7px 12px', borderRadius: 8, fontSize: 12, cursor: loading ? 'not-allowed' : 'pointer' }}>
-            {loading ? '...' : '↻ Refresh'}
-          </button>
-        </div>
-      </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 12, marginBottom: 24 }}>
-        {[
-          { label: 'Total Channels', val: summaries.length, color: C.text },
-          { label: 'Teams', val: summaries.filter(s => s.source === 'teams').length, color: C.teams },
-          { label: 'Slack + WhatsApp', val: summaries.filter(s => s.source !== 'teams').length, color: C.accent },
-        ].map(stat => (
-          <div key={stat.label} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: '14px 18px' }}>
-            <div style={{ fontSize: 26, fontWeight: 800, color: stat.color }}>{stat.val}</div>
-            <div style={{ fontSize: 11, color: C.dim, marginTop: 3, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{stat.label}</div>
-          </div>
-        ))}
-      </div>
-      {loading ? (
-        <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading summaries...</div>
-      ) : summaries.length === 0 ? (
-        <div style={{ textAlign: 'center', color: C.dim, padding: '60px 20px', background: C.card, borderRadius: 12, border: `1px solid ${C.border}` }}>
-          <div style={{ fontSize: 32, marginBottom: 12 }}>📝</div>
-          <div style={{ fontSize: 14, color: C.text, fontWeight: 600 }}>No summaries yet</div>
-          <div style={{ fontSize: 12, marginTop: 8, marginBottom: 16 }}>Click "Re-summarize All" to generate</div>
-          <button onClick={triggerRefresh} style={{ background: `${C.accent}22`, border: `1px solid ${C.accent}44`, color: C.accent, padding: '8px 20px', borderRadius: 8, fontSize: 13, cursor: 'pointer' }}>✦ Generate Now</button>
-        </div>
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-          {(() => {
-            const items: React.ReactNode[] = [];
-            let lastHour = '';
-            summaries.forEach((s, i) => {
-              const hourLabel = getHourLabel(s.last_updated);
-              if (hourLabel !== lastHour) {
-                items.push(<HourSeparator key={`sep-${i}`} label={hourLabel} />);
-                lastHour = hourLabel;
-              }
-              const color = sourceColor(s.source);
-              const { task, files, links, isEmpty } = parseExtraction(s.summary_text || '');
-              const isDismissing = dismissing === `${s.source}:${s.channel_id}`;
-              const images = (s.image_urls || []).filter(Boolean);
-              const linkList = links ? links.split(',').map(l => l.trim()).filter(Boolean) : [];
-              const taskList = task
-                ? task
-                    .replace(/\r/g, '')
-                    .split(/\n[•\-]\s*|;\s*|\n+/)
-                    .map(t => t.replace(/^TASKS?:\s*/i, '').trim())
-                    .filter(Boolean)
-                : [];
-              const fileList = files ? files.split(',').map(f => f.trim()).filter(Boolean) : [];
-              const hasContent = !isEmpty || images.length > 0;
-              items.push(
-                <div key={i} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: 20, opacity: isDismissing ? 0.4 : 1, transition: 'opacity 0.2s' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-                    <div style={{ width: 34, height: 34, borderRadius: 10, background: `${color}15`, border: `1px solid ${color}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                      {s.source === 'slack' ? ICONS.slack(16, color) : s.source === 'whatsapp' ? ICONS.whatsapp(16, color) : ICONS.teams(16, color)}
-                    </div>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{s.source === 'slack' ? resolveSlack(s.channel_id, s.channel_name) : s.channel_name}</div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 3 }}>
-                        <span style={{ fontSize: 10, fontWeight: 700, background: `${color}15`, color, border: `1px solid ${color}33`, padding: '1px 7px', borderRadius: 4, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{s.source}</span>
-                        <span style={{ fontSize: 11, color: C.dim }}>{s.message_count} messages</span>
-                      </div>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexShrink: 0 }}>
-                      <div style={{ fontSize: 11, color: C.dim, fontWeight: 500 }}>{s.last_updated ? formatDate(s.last_updated) : 'N/A'}</div>
-                      <button onClick={() => dismissSummary(s.source, s.channel_id)} disabled={isDismissing} style={{ width: 26, height: 26, borderRadius: '50%', background: 'transparent', border: `1px solid ${C.border}`, color: C.dim, fontSize: 13, cursor: isDismissing ? 'not-allowed' : 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
-                        onMouseEnter={e => { e.currentTarget.style.background = '#ef444422'; e.currentTarget.style.borderColor = '#ef4444'; e.currentTarget.style.color = '#ef4444'; }}
-                        onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; e.currentTarget.style.borderColor = C.border; e.currentTarget.style.color = C.dim; }}>✕</button>
-                    </div>
-                  </div>
-                  {!hasContent ? (
-                    <div style={{ background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 12, padding: '14px 18px', fontSize: 12, color: C.dim, fontStyle: 'italic', textAlign: 'center' }}>No actionable request found</div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                      {task && (
-                        <div style={{ background: `${C.accent}08`, border: `1px solid ${C.accent}22`, borderRadius: 12, padding: '12px 16px', position: 'relative' }}>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                            {ICONS.sparkle(14, C.accent)}
-                            <div style={{ fontSize: 11, fontWeight: 800, color: C.accent, textTransform: 'uppercase', letterSpacing: '0.08em' }}>AI Insight</div>
-                          </div>
-                          <div style={{ fontSize: 13, color: C.text, lineHeight: 1.6 }}>
-                            {taskList.length > 1 ? taskList.map((t, idx) => (
-                              <div key={idx} style={{ marginBottom: idx === taskList.length - 1 ? 0 : 6 }}>• {t}</div>
-                            )) : task}
-                          </div>
-                        </div>
-                      )}
-                      {images.length > 0 && (
-                        <div style={{ background: `${C.sidebar}66`, border: `1px solid ${C.border}44`, borderRadius: 12, padding: '12px 16px' }}>
-                          <div style={{ fontSize: 11, fontWeight: 800, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-                            {ICONS.link(14, C.dim)} Attached Media
-                          </div>
-                          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10 }}>
-                            {images.map((url, j) => (
-                              <a key={j} href={url} target="_blank" rel="noopener noreferrer" style={{ display: 'block', borderRadius: 10, overflow: 'hidden', border: `1px solid ${C.border}66`, flexShrink: 0, transition: 'transform 0.2s' }}
-                                onMouseEnter={e => e.currentTarget.style.transform = 'scale(1.05)'}
-                                onMouseLeave={e => e.currentTarget.style.transform = 'scale(1)'}>
-                                <img src={url} alt={`attachment-${j + 1}`} style={{ width: 100, height: 80, objectFit: 'cover', display: 'block' }} onError={e => { const p = (e.target as HTMLImageElement).parentElement; if (p) p.style.display = 'none'; }} />
-                              </a>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {fileList.length > 0 && (
-                        <div style={{ background: `${C.sidebar}66`, border: `1px solid ${C.border}44`, borderRadius: 12, padding: '12px 16px' }}>
-                          <div style={{ fontSize: 11, fontWeight: 800, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-                            {ICONS.link(14, C.dim)} Mentioned Files
-                          </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            {fileList.map((f, j) => (
-                              <div key={j} style={{ fontSize: 12, color: C.text, fontWeight: 600 }}>• {f}</div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                      {linkList.length > 0 && (
-                        <div style={{ background: `${C.sidebar}66`, border: `1px solid ${C.border}44`, borderRadius: 12, padding: '12px 16px' }}>
-                          <div style={{ fontSize: 11, fontWeight: 800, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 }}>
-                            {ICONS.link(14, C.dim)} Referenced Links
-                          </div>
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-                            {linkList.map((l, j) => (
-                              <a key={j} href={l} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12, color: C.accent, textDecoration: 'none', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{ICONS.link(10, C.accent)} {l}</a>
-                            ))}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
-              );
-            });
-            return items;
-          })()}
-        </div>
-      )}
-    </div>
+    <SummariesSectionView
+      C={C}
+      ICONS={ICONS}
+      HourSeparator={HourSeparator}
+      getHourLabel={getHourLabel}
+      formatDate={formatDate}
+      resolveSlack={(id = '', fallback = '') => resolveSlack(id, fallback)}
+    />
   );
 }
 
 // ─── Task Planner Section ─────────────────────────────────────────────────────
 function TaskSection() {
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState('');
-
-  const fetchTasks = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await apiFetchJson<Task[]>(`${API}/api/tasks`, { headers: authHeaders() });
-      setTasks(Array.isArray(data) ? data : []);
-    } catch (err: any) {
-      console.error('[Tasks]', err);
-      setError(err?.message || 'Failed to load tasks');
-      setTasks([]);
-    }
-    finally { setLoading(false); }
-  }, []);
-
-  useEffect(() => { fetchTasks(); }, [fetchTasks]);
-
-  async function updateStatus(id: number, status: string) {
-    try {
-      await apiFetchJson(`${API}/api/tasks/${id}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ status })
-      });
-      setTasks(prev => prev.map(t => t.id === id ? { ...t, status } : t));
-    } catch (err) { console.error('[Task Status]', err); }
-  }
-
-  const pending = tasks.filter(t => t.status !== 'done');
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <SectionHeader title="Task Planner" sub="Actionable requests assigned to Microsoft Teams" onRefresh={fetchTasks} loading={loading} />
-      {loading ? <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading tasks...</div>
-        : error ? <EmptyState message={error} type="error" />
-        : pending.length === 0 ? <EmptyState message="No pending tasks" />
-          : (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-              {(() => {
-                const items: any[] = [];
-                let lastHour = '';
-                pending.forEach(task => {
-                  const hour = getHourLabel(task.created_at);
-                  if (hour !== lastHour) {
-                    items.push(<HourSeparator key={`sep-task-${task.id}`} label={hour} />);
-                    lastHour = hour;
-                  }
-                  items.push(
-                    <div key={task.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 16, padding: '20px 24px', display: 'flex', gap: 20, boxShadow: '0 8px 32px rgba(0,0,0,0.15)' }}>
-                      <div style={{ width: 48, height: 48, borderRadius: 12, background: `${C.accent}15`, border: `1px solid ${C.accent}33`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}>
-                        {ICONS.taskPlanner(24, C.accent)}
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                          <span style={{ fontSize: 13, fontWeight: 700, color: C.text }}>{task.client_name || 'System Task'}</span>
-                          <span style={{ fontSize: 11, color: C.dim, fontWeight: 500 }}>{new Date(task.created_at).toLocaleDateString()}</span>
-                        </div>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
-                          {(() => {
-                            const isWA = task.source === 'whatsapp';
-                            const brandColor = isWA ? C.wa : C.slack;
-                            const brandBg = isWA ? `${C.wa}15` : `${C.slack}15`;
-                            const brandBorder = isWA ? `${C.wa}33` : `${C.slack}33`;
-                            return (
-                              <span style={{ fontSize: 10, fontWeight: 800, color: brandColor, background: brandBg, padding: '3px 10px', borderRadius: 6, border: `1px solid ${brandBorder}`, textTransform: 'uppercase', letterSpacing: '0.05em', display: 'flex', alignItems: 'center', gap: 6 }}>
-                                {isWA ? ICONS.whatsapp(12, brandColor) : ICONS.slack(12, brandColor)}
-                                {task.source === 'slack' ? resolveSlack(task.platform_label, task.platform_label) : task.platform_label}
-                              </span>
-                            );
-                          })()}
-                          {ICONS.arrowRight(12, C.dim)}
-                          <span style={{ fontSize: 11, color: C.accent, fontWeight: 700, display: 'flex', alignItems: 'center', gap: 5 }}>
-                            {ICONS.sparkle(12, C.accent)} Priority Insight
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 13, color: C.text, lineHeight: 1.6, background: `${C.sidebar}66`, padding: 14, borderRadius: 10, border: `1px solid ${C.border}44` }}>{task.body}</div>
-
-                        <div style={{ display: 'flex', gap: 12, marginTop: 16 }}>
-                          <button onClick={() => updateStatus(task.id, 'done')}
-                            style={{ background: `${C.accent}22`, border: `1px solid ${C.accent}44`, color: C.accent, padding: '7px 18px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: 'pointer', transition: 'all 0.2s' }}
-                            onMouseEnter={e => e.currentTarget.style.background = `${C.accent}33`}
-                            onMouseLeave={e => e.currentTarget.style.background = `${C.accent}22`}>
-                            Verify & Close
-                          </button>
-                          <button onClick={() => updateStatus(task.id, 'dismissed')}
-                            style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.dim, padding: '7px 18px', borderRadius: 8, fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
-                            Archive
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                });
-                return items;
-              })()}
-            </div>
-          )}
-    </div>
+    <TaskSectionView
+      C={C}
+      ICONS={ICONS}
+      API={API}
+      SectionHeader={SectionHeader}
+      EmptyState={EmptyState}
+      HourSeparator={HourSeparator}
+      resolveSlack={resolveSlack}
+      getHourLabel={getHourLabel}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
 
 function LinkReadsSection() {
-  const [items, setItems] = useState<LinkRead[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [expandedReads, setExpandedReads] = useState<Record<number, boolean>>({});
-  const [expandedRawReads, setExpandedRawReads] = useState<Record<number, boolean>>({});
-  const [error, setError] = useState('');
-
-  function cleanSnippet(value: string, max = 280) {
-    const normalized = String(value || '').replace(/\s+/g, ' ').trim();
-    if (!normalized) return '';
-    return normalized.length > max ? `${normalized.slice(0, max)}...` : normalized;
-  }
-
-  function parseCommentPoints(commentBody: string) {
-    const raw = String(commentBody || '').trim();
-    if (!raw) return [];
-
-    const normalized = raw.replace(/\[Quoted:\s*(https?:\/\/[^\]\s]+)\s*\]/gi, '\nQuoted link: $1');
-    const lines = normalized
-      .split(/\n+|(?=Quoted link:\s*https?:\/\/)|(?=Source link:\s*https?:\/\/)/g)
-      .map((part) => part.trim())
-      .filter(Boolean);
-
-    const basePoints = lines.length > 1
-      ? lines
-      : normalized
-          .split(/(?<=[.!?])\s+/)
-          .map((part) => part.trim())
-          .filter(Boolean);
-
-    return basePoints.map((point, idx) => {
-      const labelMatch = point.match(/^(Quoted link|Source link):\s*(https?:\/\/\S+)/i);
-      if (labelMatch) {
-        return {
-          key: `link-${idx}`,
-          text: labelMatch[1],
-          href: labelMatch[2],
-        };
-      }
-
-      const urlMatch = point.match(/(https?:\/\/\S+)/i);
-      if (urlMatch) {
-        return {
-          key: `mixed-${idx}`,
-          text: cleanSnippet(point.replace(urlMatch[1], '').trim(), 180) || 'Link',
-          href: urlMatch[1],
-        };
-      }
-
-      return {
-        key: `text-${idx}`,
-        text: cleanSnippet(point, 220),
-        href: '',
-      };
-    }).filter((item) => item.text || item.href);
-  }
-
-  function parseFigmaReadContent(readContent: string) {
-    const raw = String(readContent || '').trim();
-    if (!raw) return null;
-    if (!/figma/i.test(raw)) return null;
-
-    const title = raw.match(/Title:\s*([\s\S]*?)(?=\s+URL Source:|$)/i)?.[1]?.trim() || '';
-    const source = raw.match(/URL Source:\s*([\s\S]*?)(?=\s+Published Time:|$)/i)?.[1]?.trim() || '';
-    const publishedTime = raw.match(/Published Time:\s*([\s\S]*?)(?=\s+Markdown Content:|$)/i)?.[1]?.trim() || '';
-    const markdown = raw.match(/Markdown Content:\s*([\s\S]*)$/i)?.[1]?.trim() || '';
-
-    const commentMatches = [...markdown.matchAll(/#\d+\s+([^\n#]+?)\s+(\d+\s+\w+\s+ago)\s+([\s\S]*?)(?=\s+#\d+\s+|$)/g)];
-    const comments = commentMatches
-      .map((match, idx) => ({
-        key: `figma-comment-${idx}`,
-        author: cleanSnippet(match[1], 60),
-        age: cleanSnippet(match[2], 40),
-        text: cleanSnippet(match[3].replace(/!\[.*?\]\(.*?\)/g, '').trim(), 220),
-      }))
-      .filter((item) => item.text);
-
-    return {
-      title: cleanSnippet(title, 120),
-      source,
-      publishedTime: cleanSnippet(publishedTime, 80),
-      comments: comments.slice(0, 5),
-      rawMarkdown: markdown,
-    };
-  }
-
-  function formatReadContentPoints(readContent: string): string[] {
-    const raw = String(readContent || '').trim();
-    if (!raw) return [];
-
-    const chunks = raw
-      .split(/\s*(?=Title:|URL Source:|Published Time:|Markdown Content:|Comment:)\s*/g)
-      .map((s) => s.trim())
-      .filter(Boolean);
-
-    if (chunks.length > 1) {
-      return chunks.slice(0, 8).map((chunk) => {
-        const normalized = chunk.replace(/\s+/g, ' ').trim();
-        return normalized.length > 280 ? `${normalized.slice(0, 280)}...` : normalized;
-      });
-    }
-
-    return raw
-      .split(/\n+/)
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .slice(0, 10)
-      .map((line) => (line.length > 280 ? `${line.slice(0, 280)}...` : line));
-  }
-
-  function toggleExpandedRead(id: number) {
-    setExpandedReads((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
-
-  function toggleExpandedRawRead(id: number) {
-    setExpandedRawReads((prev) => ({ ...prev, [id]: !prev[id] }));
-  }
-
-  const fetchReads = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const data = await apiFetchJson<LinkRead[]>(`${API}/api/link-reads?limit=120`, { headers: authHeaders() });
-      setItems(Array.isArray(data) ? data : []);
-    } catch (err: any) {
-      console.error('[LinkReads]', err);
-      setError(err?.message || 'Failed to load link reads');
-      setItems([]);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { fetchReads(); }, [fetchReads]);
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <SectionHeader
-        title="Link Reads"
-        sub="Jina URL reads with source, sender, comment, and extracted content"
-        onRefresh={fetchReads}
-        loading={loading}
-      />
-
-      {loading ? (
-        <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading link reads...</div>
-      ) : error ? (
-        <EmptyState message={error} type="error" />
-      ) : items.length === 0 ? (
-        <EmptyState message="No link reads yet" />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          {items.map((row) => (
-            <div key={row.id} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 14, padding: '16px 18px' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                  <span style={{ fontSize: 10, fontWeight: 800, color: C.accent, background: `${C.accent}18`, border: `1px solid ${C.accent}44`, borderRadius: 6, padding: '3px 8px', textTransform: 'uppercase' }}>
-                    {row.source || 'unknown'}
-                  </span>
-                  <span style={{ fontSize: 12, color: C.text, fontWeight: 700 }}>
-                    {row.sender || row.sender_handle || 'Unknown sender'}
-                  </span>
-                  {row.platform_label && (
-                    <span style={{ fontSize: 11, color: C.dim }}>
-                      via {row.platform_label}
-                    </span>
-                  )}
-                </div>
-                <span style={{ fontSize: 11, color: C.dim }}>
-                  {row.created_at ? new Date(row.created_at).toLocaleString('en-IN') : ''}
-                </span>
-              </div>
-
-              <a
-                href={row.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                style={{ display: 'block', fontSize: 12, color: C.accent, textDecoration: 'none', marginBottom: 10, wordBreak: 'break-all' }}
-              >
-                {row.url}
-              </a>
-
-              {row.comment_body && (
-                <div style={{ fontSize: 12, color: C.text, background: `${C.sidebar}66`, border: `1px solid ${C.border}44`, borderRadius: 10, padding: 10, marginBottom: 10 }}>
-                  <b>Comment:</b>
-                  <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-                    {parseCommentPoints(row.comment_body).map((point) => (
-                      <li key={`${row.id}-${point.key}`} style={{ marginBottom: 4, wordBreak: 'break-word' }}>
-                        {point.text}
-                        {point.href && (
-                          <>
-                            {point.text ? ' ' : ''}
-                            <a
-                              href={point.href}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{ color: C.accent, textDecoration: 'none', fontWeight: 700 }}
-                            >
-                              {point.text.toLowerCase().includes('quoted') ? 'Open quoted link' : 'Open link'}
-                            </a>
-                          </>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              )}
-
-              <div style={{ fontSize: 12, color: C.text, lineHeight: 1.5, background: `${C.sidebar}66`, border: `1px solid ${C.border}44`, borderRadius: 10, padding: 10 }}>
-                <b>Read Content:</b>
-                {row.read_content ? (() => {
-                  const figmaData = parseFigmaReadContent(row.read_content);
-                  const points = formatReadContentPoints(row.read_content);
-                  const expanded = !!expandedReads[row.id];
-                  const visiblePoints = expanded ? points : points.slice(0, 5);
-                  const canExpand = points.length > 5;
-                  const rawExpanded = !!expandedRawReads[row.id];
-
-                  return (
-                    <>
-                      {figmaData ? (
-                        <div style={{ marginTop: 8 }}>
-                          <div style={{ display: 'grid', gap: 8 }}>
-                            {figmaData.title && (
-                              <div><b>Title:</b> {figmaData.title}</div>
-                            )}
-                            {figmaData.source && (
-                              <div>
-                                <b>Source:</b>{' '}
-                                <a href={figmaData.source} target="_blank" rel="noopener noreferrer" style={{ color: C.accent, textDecoration: 'none' }}>
-                                  Open source link
-                                </a>
-                              </div>
-                            )}
-                            {figmaData.publishedTime && (
-                              <div><b>Published:</b> {figmaData.publishedTime}</div>
-                            )}
-                          </div>
-
-                          {figmaData.comments.length > 0 && (
-                            <>
-                              <div style={{ marginTop: 10, fontWeight: 700 }}>Top comments</div>
-                              <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-                                {figmaData.comments.map((comment) => (
-                                  <li key={`${row.id}-${comment.key}`} style={{ marginBottom: 6, wordBreak: 'break-word' }}>
-                                    <b>{comment.author}</b>{comment.age ? ` (${comment.age})` : ''}: {comment.text}
-                                  </li>
-                                ))}
-                              </ul>
-                            </>
-                          )}
-
-                          {figmaData.rawMarkdown && (
-                            <>
-                              <button
-                                type="button"
-                                onClick={() => toggleExpandedRawRead(row.id)}
-                                style={{
-                                  marginTop: 8,
-                                  border: 'none',
-                                  background: 'transparent',
-                                  color: C.accent,
-                                  fontSize: 12,
-                                  fontWeight: 700,
-                                  cursor: 'pointer',
-                                  padding: 0,
-                                }}
-                              >
-                                {rawExpanded ? 'Hide raw content' : 'Show raw content'}
-                              </button>
-                              {rawExpanded && (
-                                <div style={{ marginTop: 8, whiteSpace: 'pre-wrap', wordBreak: 'break-word', color: C.dim }}>
-                                  {cleanSnippet(figmaData.rawMarkdown, 1500)}
-                                </div>
-                              )}
-                            </>
-                          )}
-                        </div>
-                      ) : (
-                        <>
-                          <ul style={{ margin: '8px 0 0', paddingLeft: 18 }}>
-                            {visiblePoints.map((point, idx) => (
-                              <li key={`${row.id}-rc-${idx}`} style={{ marginBottom: 4, wordBreak: 'break-word' }}>
-                                {point}
-                              </li>
-                            ))}
-                          </ul>
-                          {canExpand && (
-                            <button
-                              type="button"
-                              onClick={() => toggleExpandedRead(row.id)}
-                              style={{
-                                marginTop: 8,
-                                border: 'none',
-                                background: 'transparent',
-                                color: C.accent,
-                                fontSize: 12,
-                                fontWeight: 700,
-                                cursor: 'pointer',
-                                padding: 0,
-                              }}
-                            >
-                              {expanded ? 'Show less' : `Show more (${points.length - visiblePoints.length} more)`}
-                            </button>
-                          )}
-                        </>
-                      )}
-                    </>
-                  );
-                })() : (
-                  <div style={{ marginTop: 6 }}>No readable content extracted.</div>
-                )}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    <LinkReadsSectionView
+      C={C}
+      API={API}
+      SectionHeader={SectionHeader}
+      EmptyState={EmptyState}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
 
 function ForwardLogSection() {
-  const [logs, setLogs] = useState<ForwardLog[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<'all' | 'delivered' | 'failed' | 'skipped'>('all');
-  const [sourceFilter, setSourceFilter] = useState<'all' | 'whatsapp' | 'slack' | 'teams'>('all');
-  const [error, setError] = useState('');
-
-  const fetchLogs = useCallback(async () => {
-    setLoading(true);
-    setError('');
-    try {
-      const params = new URLSearchParams({ limit: '100' });
-      if (filter !== 'all') params.append('status', filter);
-      if (sourceFilter !== 'all') params.append('source', sourceFilter);
-      let data: ForwardLog[];
-      try {
-        data = await apiFetchJson<ForwardLog[]>(`${API}/api/forward-logs?${params}`, { headers: authHeaders() });
-      } catch {
-        // Local fallback only; deployed frontend must use NEXT_PUBLIC_API_URL.
-        if (
-          typeof window !== 'undefined' &&
-          (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1')
-        ) {
-          data = await apiFetchJson<ForwardLog[]>(`http://${window.location.hostname}:5000/api/forward-logs?${params}`, { headers: authHeaders() });
-        } else {
-          throw new Error('API base URL is unreachable. Set NEXT_PUBLIC_API_URL.');
-        }
-      }
-      setLogs(Array.isArray(data) ? data : []);
-    } catch (err: any) {
-      console.error('[ForwardLog]', err);
-      setError(err?.message || 'Failed to load forward logs');
-      setLogs([]);
-    } finally {
-      setLoading(false);
-    }
-  }, [filter, sourceFilter]);
-
-  useEffect(() => { fetchLogs(); }, [fetchLogs]);
-  useEffect(() => {
-    const t = setInterval(fetchLogs, 30000);
-    return () => clearInterval(t);
-  }, [fetchLogs]);
-
-  const delivered = logs.filter(l => l.status === 'delivered').length;
-  const failed = logs.filter(l => l.status === 'failed').length;
-  const skipped = logs.filter(l => l.status === 'skipped' || l.status === 'no_mapping').length;
-
-  function statusColor(s: string) {
-    if (s === 'delivered') return '#22c55e';
-    if (s === 'failed') return '#ef4444';
-    return C.dim;
-  }
-
-  // Group logs by date
-  function getDateLabel(iso: string) {
-    if (!iso) return 'Unknown';
-    const d = new Date(iso);
-    const today = new Date();
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    if (d.toDateString() === today.toDateString()) return 'Today';
-    if (d.toDateString() === yesterday.toDateString()) return 'Yesterday';
-    return d.toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric' });
-  }
-
-  // Build grouped list
-  const groupedLogs: { dateLabel: string; logs: ForwardLog[] }[] = [];
-  let currentLabel = '';
-  logs.forEach(log => {
-    const label = getDateLabel(log.forwarded_at);
-    if (label !== currentLabel) {
-      groupedLogs.push({ dateLabel: label, logs: [] });
-      currentLabel = label;
-    }
-    groupedLogs[groupedLogs.length - 1].logs.push(log);
-  });
-
   return (
-    <div style={{ padding: 'clamp(12px, 2.8vw, 24px)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
-        <div>
-          <div style={{ fontSize: 20, fontWeight: 700, color: C.text }}>Forward Log</div>
-          <div style={{ fontSize: 12, color: C.muted, marginTop: 3 }}>Real-time trail of every message OpenClaw processed</div>
-        </div>
-        <button onClick={fetchLogs} disabled={loading}
-          style={{ background: `${C.accent}15`, border: `1px solid ${C.accent}33`, color: loading ? C.muted : C.accent, padding: '8px 16px', borderRadius: 8, fontSize: 12, cursor: loading ? 'not-allowed' : 'pointer', fontWeight: 700, display: 'flex', alignItems: 'center', gap: 8 }}>
-          {loading ? '...' : (
-            <>
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M23 4v6h-6"></path><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path></svg>
-              Refresh
-            </>
-          )}
-        </button>
-      </div>
-
-      {/* Stats */}
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4,1fr)', gap: 12, marginBottom: 20 }}>
-        {[
-          { label: 'Total', val: logs.length, color: C.text },
-          { label: 'Delivered', val: delivered, color: '#22c55e' },
-          { label: 'Failed', val: failed, color: '#ef4444' },
-          { label: 'Skipped', val: skipped, color: C.dim },
-        ].map(stat => (
-          <div key={stat.label} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 10, padding: '12px 16px' }}>
-            <div style={{ fontSize: 24, fontWeight: 800, color: stat.color }}>{stat.val}</div>
-            <div style={{ fontSize: 11, color: C.dim, marginTop: 2, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>{stat.label}</div>
-          </div>
-        ))}
-      </div>
-
-      {/* Filters */}
-      <div style={{ display: 'flex', gap: 8, marginBottom: 16, flexWrap: 'wrap' }}>
-        {(['all', 'delivered', 'failed', 'skipped'] as const).map(s => (
-          <button key={s} onClick={() => setFilter(s)} style={{ padding: '5px 14px', borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize', background: filter === s ? `${C.accent}33` : C.card, border: `1px solid ${filter === s ? C.accent : C.border}`, color: filter === s ? C.accent : C.muted }}>{s}</button>
-        ))}
-        <div style={{ width: 1, background: C.border, margin: '0 4px' }} />
-        {(['all', 'whatsapp', 'slack', 'teams'] as const).map(s => (
-          <button key={s} onClick={() => setSourceFilter(s)} style={{ padding: '5px 14px', borderRadius: 20, fontSize: 11, fontWeight: 600, cursor: 'pointer', textTransform: 'capitalize', background: sourceFilter === s ? `${C.wa}22` : C.card, border: `1px solid ${sourceFilter === s ? C.wa : C.border}`, color: sourceFilter === s ? C.wa : C.muted }}>{s}</button>
-        ))}
-      </div>
-
-      {/* Logs grouped by date */}
-      {loading ? (
-        <div style={{ color: C.muted, textAlign: 'center', padding: 40 }}>Loading logs...</div>
-      ) : error ? (
-        <EmptyState message={error} type="error" />
-      ) : logs.length === 0 ? (
-        <EmptyState message="No flow logs recorded matching current filters." />
-      ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 0 }}>
-          {groupedLogs.map((group, gi) => (
-            <div key={gi}>
-              {/* Date separator */}
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, margin: '20px 0 12px' }}>
-                <div style={{ flex: 1, height: 1, background: C.border }} />
-                <div style={{ fontSize: 11, color: C.dim, fontWeight: 800, padding: '4px 14px', background: C.sidebar, borderRadius: 20, border: `1px solid ${C.border}`, whiteSpace: 'nowrap', textTransform: 'uppercase', letterSpacing: '0.08em' }}>
-                  {group.dateLabel}
-                </div>
-                <div style={{ flex: 1, height: 1, background: C.border }} />
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {group.logs.map(log => {
-                  const sc = statusColor(log.status);
-                  const isS = log.source === 'slack';
-                  const isD = log.destination === 'slack';
-                  return (
-                    <div key={log.id} style={{ background: C.card, border: `1px solid ${log.status === 'failed' ? '#ef444433' : (log.status === 'skipped' ? `${C.muted}33` : C.border)}`, borderLeft: `4px solid ${sc}`, borderRadius: 12, padding: '16px 18px', display: 'flex', alignItems: 'flex-start', gap: 14, boxShadow: '0 4px 16px rgba(0,0,0,0.1)' }}>
-                      <div style={{ width: 28, height: 28, borderRadius: 8, background: `${sc}15`, display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0, marginTop: 2 }}>
-                        {log.status === 'delivered' ? ICONS.check(14, sc) : log.status === 'failed' ? ICONS.error(14, sc) : ICONS.link(14, sc)}
-                      </div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8, flexWrap: 'wrap' }}>
-                          <span style={{ fontSize: 12, fontWeight: 800, color: C.text, display: 'flex', alignItems: 'center', gap: 6, background: `${C.sidebar}AA`, padding: '3px 8px', borderRadius: 6, border: `1px solid ${C.border}66` }}>
-                            {log.source === 'slack' ? ICONS.slack(14, C.slack) : log.source === 'whatsapp' ? ICONS.whatsapp(14, C.wa) : ICONS.teams(14, C.teams)}
-                            {isS ? resolveSlack(log.source_channel, log.source_channel) : log.source_channel}
-                          </span>
-                          {ICONS.arrowRight(12)}
-                          <span style={{ fontSize: 12, fontWeight: 800, color: C.teams, display: 'flex', alignItems: 'center', gap: 6, background: `${C.sidebar}AA`, padding: '3px 8px', borderRadius: 6, border: `1px solid ${C.border}66` }}>
-                            {log.destination === 'slack' ? ICONS.slack(14, C.slack) : ICONS.teams(14, C.teams)}
-                            {isD ? resolveSlack(log.dest_channel, log.dest_channel) : log.dest_channel}
-                          </span>
-                          {log.is_batched && (
-                            <span style={{ fontSize: 10, fontWeight: 700, background: `${C.accent}15`, color: C.accent, border: `1px solid ${C.accent}33`, padding: '1px 7px', borderRadius: 4 }}>📦 BATCHED</span>
-                          )}
-                          {log.ai_category && (
-                            <span style={{ fontSize: 10, fontWeight: 700, background: '#2563eb22', color: '#60a5fa', border: '1px solid #2563eb44', padding: '1px 7px', borderRadius: 4, textTransform: 'uppercase' }}>🤖 {log.ai_category.replace('_', ' ')}</span>
-                          )}
-                          {log.task_id && (
-                            <span style={{ fontSize: 10, fontWeight: 700, background: '#818cf822', color: '#818cf8', border: '1px solid #818cf844', padding: '1px 7px', borderRadius: 4 }}>📌 Task #{log.task_id}</span>
-                          )}
-                        </div>
-                        {log.message_preview && (
-                          <div style={{ fontSize: 12, color: C.text, marginBottom: 6, lineHeight: 1.5, whiteSpace: 'pre-wrap' }}>
-                            "{clean(log.message_preview)}"
-                          </div>
-                        )}
-                        {log.ai_reason && (
-                          <div style={{ fontSize: 11, color: C.muted, background: `${C.sidebar}88`, padding: '6px 10px', borderRadius: 6, fontStyle: 'italic', marginBottom: 6 }}>
-                            ✦ {log.ai_reason}
-                          </div>
-                        )}
-                        {/* Media Preview in Log */}
-                        {log.media_urls && parseLinks(log.media_urls).length > 0 && (
-                          <div style={{ display: 'flex', gap: 6, marginTop: 8, overflowX: 'auto', paddingBottom: 4 }}>
-                            {parseLinks(log.media_urls).map((url, i) => (
-                              <img key={i} src={proxyUrl(url)} alt="log attachment"
-                                style={{ width: 60, height: 60, borderRadius: 6, objectFit: 'cover', border: `1px solid ${C.border}` }}
-                                onError={e => { (e.target as HTMLImageElement).style.display = 'none'; }}
-                              />
-                            ))}
-                          </div>
-                        )}
-                        {log.error_reason && (
-                          <div style={{ fontSize: 11, color: '#ef4444', marginTop: 4 }}>⚠️ {log.error_reason}</div>
-                        )}
-                      </div>
-                      <div style={{ fontSize: 11, color: C.dim, flexShrink: 0, textAlign: 'right' }}>
-                        {log.forwarded_at ? new Date(log.forwarded_at).toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', hour12: true }) : ''}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+    <ForwardLogSectionView
+      C={C}
+      ICONS={ICONS}
+      API={API}
+      EmptyState={EmptyState}
+      resolveSlack={resolveSlack}
+      parseLinks={parseLinks}
+      proxyUrl={proxyUrl}
+      clean={clean}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
 
-
-// ─── Admin Dashboard Section ─────────────────────────────────────────────────
 function AdminSection() {
-  const [health, setHealth] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [aiConfig, setAiConfig] = useState<any>(null);
-  const [aiApiKeyInput, setAiApiKeyInput] = useState('');
-  const [aiModelInput, setAiModelInput] = useState('gpt-4o');
-  const [aiSaving, setAiSaving] = useState(false);
-  const [aiMsg, setAiMsg] = useState('');
-  const [supabaseConfig, setSupabaseConfig] = useState<any>(null);
-  const [supabaseUrlInput, setSupabaseUrlInput] = useState('');
-  const [supabaseServiceKeyInput, setSupabaseServiceKeyInput] = useState('');
-  const [supabaseBucketInput, setSupabaseBucketInput] = useState('');
-  const [supabaseDbUrlInput, setSupabaseDbUrlInput] = useState('');
-  const [supabaseSaving, setSupabaseSaving] = useState(false);
-  const [supabaseMsg, setSupabaseMsg] = useState('');
-  const [supabaseVerifying, setSupabaseVerifying] = useState(false);
-  const [verifyMsg, setVerifyMsg] = useState('');
-  const [schemaText, setSchemaText] = useState('');
-  const [supabaseVerified, setSupabaseVerified] = useState(false);
-
-  const fetchHealth = async () => {
-    setLoading(true);
-    try {
-      const data = await apiFetchJson<any>(`${API}/api/messages/health`, {
-        headers: {
-          'Content-Type': 'application/json',
-          ...authHeaders(),
-        }
-      });
-      console.log('Health data received:', data);
-      setHealth(data);
-    } catch (err) {
-      console.error('Health check fetch error:', err);
-      setHealth(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const fetchAiConfig = async () => {
-    try {
-      const r = await fetch(`${API}/api/settings/ai`, { headers: authHeaders() });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      const cfg = data?.config || null;
-      setAiConfig(cfg);
-      setAiModelInput(cfg?.model || 'gpt-4o');
-      setAiApiKeyInput('');
-    } catch (err: any) {
-      setAiMsg(`Failed to load AI config: ${err?.message || 'unknown error'}`);
-    }
-  };
-
-  const saveAiConfig = async () => {
-    setAiSaving(true);
-    setAiMsg('');
-    try {
-      const payload: Record<string, any> = {};
-      if (aiApiKeyInput.trim()) payload.apiKey = aiApiKeyInput.trim();
-      if (aiModelInput.trim()) payload.model = aiModelInput.trim();
-      if (Object.keys(payload).length === 0) {
-        setAiMsg('Enter API key or model first.');
-        setAiSaving(false);
-        return;
-      }
-      const r = await fetch(`${API}/api/settings/ai`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify(payload),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || data?.success === false) throw new Error(data?.error || `HTTP ${r.status}`);
-      setAiMsg('AI config updated.');
-      await fetchAiConfig();
-    } catch (err: any) {
-      setAiMsg(`Save failed: ${err?.message || 'unknown error'}`);
-    } finally {
-      setAiSaving(false);
-    }
-  };
-
-  const resetAiConfig = async () => {
-    setAiSaving(true);
-    setAiMsg('');
-    try {
-      const r = await fetch(`${API}/api/settings/ai`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ reset: true }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || data?.success === false) throw new Error(data?.error || `HTTP ${r.status}`);
-      setAiMsg('AI config reset to .env defaults.');
-      await fetchAiConfig();
-    } catch (err: any) {
-      setAiMsg(`Reset failed: ${err?.message || 'unknown error'}`);
-    } finally {
-      setAiSaving(false);
-    }
-  };
-
-  const fetchSupabaseConfig = async () => {
-    try {
-      const r = await fetch(`${API}/api/settings/supabase`, { headers: authHeaders() });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const data = await r.json();
-      const cfg = data?.config || null;
-      setSupabaseConfig(cfg);
-      setSupabaseUrlInput(cfg?.url || '');
-      setSupabaseBucketInput(cfg?.bucket || '');
-      setSupabaseServiceKeyInput('');
-      setSupabaseDbUrlInput('');
-      setSupabaseVerified(false);
-    } catch (err: any) {
-      setSupabaseMsg(`Failed to load Supabase config: ${err?.message || 'unknown error'}`);
-    }
-  };
-
-  const saveSupabaseConfig = async () => {
-    setSupabaseSaving(true);
-    setSupabaseMsg('');
-    try {
-      if (!supabaseUrlInput.trim() || !supabaseServiceKeyInput.trim() || !supabaseDbUrlInput.trim()) {
-        setSupabaseMsg('Fill URL, Service Key and DB URL (bucket can fallback to .env).');
-        setSupabaseSaving(false);
-        return;
-      }
-      const r = await fetch(`${API}/api/settings/supabase`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({
-          url: supabaseUrlInput.trim(),
-          serviceKey: supabaseServiceKeyInput.trim(),
-          bucket: supabaseBucketInput.trim() || undefined,
-          dbUrl: supabaseDbUrlInput.trim(),
-        }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || data?.success === false) throw new Error(data?.error || `HTTP ${r.status}`);
-      setSupabaseMsg(data?.message || 'Supabase config saved.');
-      setSupabaseVerified(false);
-      await fetchSupabaseConfig();
-    } catch (err: any) {
-      setSupabaseMsg(`Save failed: ${err?.message || 'unknown error'}`);
-    } finally {
-      setSupabaseSaving(false);
-    }
-  };
-
-  const resetSupabaseConfig = async () => {
-    setSupabaseSaving(true);
-    setSupabaseMsg('');
-    try {
-      const r = await fetch(`${API}/api/settings/supabase`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ reset: true }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || data?.success === false) throw new Error(data?.error || `HTTP ${r.status}`);
-      setSupabaseMsg(data?.message || 'Supabase config reset.');
-      setSupabaseVerified(false);
-      await fetchSupabaseConfig();
-    } catch (err: any) {
-      setSupabaseMsg(`Reset failed: ${err?.message || 'unknown error'}`);
-    } finally {
-      setSupabaseSaving(false);
-    }
-  };
-
-  const verifySupabaseConfig = async () => {
-    setSupabaseVerifying(true);
-    setVerifyMsg('');
-    try {
-      const r = await fetch(`${API}/api/settings/supabase/verify`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...authHeaders() },
-        body: JSON.stringify({ dbUrl: supabaseDbUrlInput.trim() || undefined }),
-      });
-      const data = await r.json().catch(() => ({}));
-      if (!r.ok || data?.success === false) throw new Error(data?.error || `HTTP ${r.status}`);
-      setVerifyMsg(`Verified: ${data?.dbHost || 'connection ok'}`);
-      setSupabaseVerified(true);
-      setSupabaseConfig((prev: any) => ({
-        ...(prev || {}),
-        lastVerifiedAt: data?.lastVerifiedAt || new Date().toISOString(),
-        lastVerifiedDbHost: data?.dbHost || prev?.lastVerifiedDbHost || '',
-      }));
-    } catch (err: any) {
-      setVerifyMsg(`Verify failed: ${err?.message || 'unknown error'}`);
-      setSupabaseVerified(false);
-    } finally {
-      setSupabaseVerifying(false);
-    }
-  };
-
-  const fetchSchemaText = async () => {
-    if (schemaText) return schemaText;
-    const r = await fetch(`${API}/api/settings/schema`, { headers: authHeaders() });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok || data?.success === false) throw new Error(data?.error || `HTTP ${r.status}`);
-    const schema = String(data?.schema || '');
-    setSchemaText(schema);
-    return schema;
-  };
-
-  const copySchema = async () => {
-    try {
-      const schema = await fetchSchemaText();
-      await navigator.clipboard.writeText(schema);
-      setVerifyMsg('Schema copied to clipboard.');
-    } catch (err: any) {
-      setVerifyMsg(`Copy failed: ${err?.message || 'unknown error'}`);
-    }
-  };
-
-  const downloadSchema = async () => {
-    try {
-      const r = await fetch(`${API}/api/settings/schema/download`, { headers: authHeaders() });
-      if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      const blob = await r.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'schema.sql';
-      document.body.appendChild(a);
-      a.click();
-      a.remove();
-      window.URL.revokeObjectURL(url);
-      setVerifyMsg('Schema downloaded.');
-    } catch (err: any) {
-      setVerifyMsg(`Download failed: ${err?.message || 'unknown error'}`);
-    }
-  };
-
-  const copySchemaImportCommand = async () => {
-    const cmd = `psql "$SUPABASE_DB_URL" -v ON_ERROR_STOP=1 -f database/schema.sql`;
-    try {
-      await navigator.clipboard.writeText(cmd);
-      setVerifyMsg('Import command copied.');
-    } catch (err: any) {
-      setVerifyMsg(`Copy command failed: ${err?.message || 'unknown error'}`);
-    }
-  };
-
-  useEffect(() => {
-    fetchHealth();
-    fetchAiConfig();
-    fetchSupabaseConfig();
-    const t = setInterval(fetchHealth, 30000);
-    return () => clearInterval(t);
-  }, []);
-
-  if (loading && !health) return <div style={{ padding: 80, textAlign: 'center', color: C.muted, background: C.bg }}>Loading system status...</div>;
-
-  if (!health && !loading) return (
-    <div style={{ padding: 80, textAlign: 'center', color: C.muted, background: C.bg }}>
-      <div style={{ fontSize: 40, marginBottom: 16 }}>⚠️</div>
-      <p style={{ color: C.textSoft, fontWeight: 600 }}>Unable to retrieve system health data.</p>
-      <button onClick={fetchHealth} style={{ marginTop: 20, padding: '8px 16px', background: C.accent, color: '#fff', border: 'none', borderRadius: 8, cursor: 'pointer', fontWeight: 600 }}>Retry Connection</button>
-    </div>
-  );
-
-  const teamsOk = !!health?.teams?.enabled;
-  const waOk = !!health?.whatsapp?.isReady;
-  const dbOk = health?.db === 'ok';
-
   return (
-    <div style={{ padding: 'clamp(12px, 3vw, 32px)', maxWidth: 1220, margin: '0 auto', display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24, flexWrap: 'wrap', gap: 10 }}>
-        <div>
-          <h1 className="admin-heading" style={{ fontSize: 28, fontWeight: 800, color: C.text, letterSpacing: '-0.02em' }}>System Admin</h1>
-          <p style={{ fontSize: 14, color: C.muted, marginTop: 4 }}>Operations console for runtime configuration and infrastructure health.</p>
-        </div>
-        <button onClick={fetchHealth} style={{ padding: '10px 14px', background: `${C.accent}15`, border: `1px solid ${C.accent}33`, borderRadius: 10, color: C.accent, fontWeight: 700, cursor: 'pointer', fontSize: 13, outline: 'none' }}>
-          Refresh Status
-        </button>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: 10 }}>
-        {[
-          { label: 'Database', value: dbOk ? 'Connected' : 'Error', color: dbOk ? '#10b981' : '#ef4444' },
-          { label: 'Teams', value: teamsOk ? 'Active' : 'Disabled', color: teamsOk ? '#10b981' : '#ef4444' },
-          { label: 'WhatsApp', value: waOk ? 'Online' : 'Offline', color: waOk ? '#10b981' : '#f59e0b' },
-          { label: 'Monitored Chats', value: String(health?.config?.monitoredChats || 0), color: C.accent },
-        ].map((item) => (
-          <div key={item.label} style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 12, padding: '12px 14px' }}>
-            <div style={{ fontSize: 11, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.08em' }}>{item.label}</div>
-            <div style={{ fontSize: 16, fontWeight: 800, color: item.color, marginTop: 4 }}>{item.value}</div>
-          </div>
-        ))}
-      </div>
-
-      <div className="admin-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: 16 }}>
-        {/* AI Config Card */}
-        <div className="admin-card" style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 20, padding: 'clamp(14px, 2.4vw, 24px)', minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: `${C.accent}15`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {ICONS.sparkle(20, C.accent)}
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 700, color: C.text }}>AI Configuration</h3>
-              <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>
-                Active model: <span style={{ color: C.text, fontWeight: 700 }}>{aiConfig?.model || aiModelInput || 'gpt-4o'}</span>
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <input
-              type="password"
-              value={aiApiKeyInput}
-              onChange={(e) => setAiApiKeyInput(e.target.value)}
-              placeholder="OpenAI API key (optional override)"
-              style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '10px 12px', color: C.text, fontSize: 12, outline: 'none' }}
-            />
-            <input
-              type="text"
-              value={aiModelInput}
-              onChange={(e) => setAiModelInput(e.target.value)}
-              placeholder="Model (default gpt-4o)"
-              style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '10px 12px', color: C.text, fontSize: 12, outline: 'none' }}
-            />
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button onClick={saveAiConfig} disabled={aiSaving}
-                style={{ background: `${C.accent}22`, border: `1px solid ${C.accent}44`, color: C.accent, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: aiSaving ? 'not-allowed' : 'pointer' }}>
-                {aiSaving ? 'Saving...' : 'Save AI Config'}
-              </button>
-              <button onClick={resetAiConfig} disabled={aiSaving}
-                style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.dim, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: aiSaving ? 'not-allowed' : 'pointer' }}>
-                Reset
-              </button>
-            </div>
-            <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5 }}>
-              Key source: <b style={{ color: C.text }}>{aiConfig?.keySource || 'env'}</b>
-              {aiConfig?.maskedKey ? ` (${aiConfig.maskedKey})` : ''}
-            </div>
-            {aiMsg && <div style={{ fontSize: 11, color: aiMsg.toLowerCase().includes('failed') ? '#ef4444' : C.accent }}>{aiMsg}</div>}
-          </div>
-        </div>
-
-        {/* Supabase Config Card */}
-        <div className="admin-card" style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 20, padding: 'clamp(14px, 2.4vw, 24px)', minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 16 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: `${C.teams}15`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <span style={{ fontSize: 18 }}>🗄️</span>
-            </div>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Supabase Configuration</h3>
-              <div style={{ fontSize: 12, color: C.dim, marginTop: 2 }}>
-                Source: <span style={{ color: C.text, fontWeight: 700 }}>{supabaseConfig?.source || 'env'}</span>
-                {supabaseConfig?.dbHost ? ` | ${supabaseConfig.dbHost}` : ''}
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <input
-              type="text"
-              value={supabaseUrlInput}
-              onChange={(e) => {
-                setSupabaseUrlInput(e.target.value);
-                setSupabaseVerified(false);
-              }}
-              placeholder="SUPABASE_URL"
-              style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '10px 12px', color: C.text, fontSize: 12, outline: 'none' }}
-            />
-            <input
-              type="password"
-              value={supabaseServiceKeyInput}
-              onChange={(e) => {
-                setSupabaseServiceKeyInput(e.target.value);
-                setSupabaseVerified(false);
-              }}
-              placeholder="SUPABASE_SERVICE_KEY"
-              style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '10px 12px', color: C.text, fontSize: 12, outline: 'none' }}
-            />
-            <input
-              type="text"
-              value={supabaseBucketInput}
-              onChange={(e) => {
-                setSupabaseBucketInput(e.target.value);
-                setSupabaseVerified(false);
-              }}
-              placeholder="SUPABASE_BUCKET (optional override)"
-              style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '10px 12px', color: C.text, fontSize: 12, outline: 'none' }}
-            />
-            <div style={{ fontSize: 11, color: C.dim, marginTop: -4 }}>
-              Leave bucket empty to use default from <b style={{ color: C.text }}>.env</b>.
-            </div>
-            <input
-              type="password"
-              value={supabaseDbUrlInput}
-              onChange={(e) => {
-                setSupabaseDbUrlInput(e.target.value);
-                setSupabaseVerified(false);
-              }}
-              placeholder="SUPABASE_DB_URL (pooler URI)"
-              style={{ width: '100%', background: C.sidebar, border: `1px solid ${C.border}`, borderRadius: 10, padding: '10px 12px', color: C.text, fontSize: 12, outline: 'none' }}
-            />
-            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-              <button onClick={verifySupabaseConfig} disabled={supabaseVerifying}
-                style={{ background: `${C.accent}15`, border: `1px solid ${C.accent}44`, color: C.accent, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: supabaseVerifying ? 'not-allowed' : 'pointer' }}>
-                {supabaseVerifying ? 'Verifying...' : 'Verify Connection'}
-              </button>
-              <button onClick={saveSupabaseConfig} disabled={supabaseSaving}
-                style={{ background: `${C.teams}22`, border: `1px solid ${C.teams}55`, color: C.teams, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: supabaseSaving ? 'not-allowed' : 'pointer' }}>
-                {supabaseSaving ? 'Saving...' : 'Save Supabase'}
-              </button>
-              <button onClick={resetSupabaseConfig} disabled={supabaseSaving}
-                style={{ background: 'transparent', border: `1px solid ${C.border}`, color: C.dim, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: supabaseSaving ? 'not-allowed' : 'pointer' }}>
-                Reset
-              </button>
-              <button onClick={copySchema} disabled={!supabaseVerified} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: supabaseVerified ? C.text : C.dim, opacity: supabaseVerified ? 1 : 0.6, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: supabaseVerified ? 'pointer' : 'not-allowed' }}>
-                Copy Schema
-              </button>
-              <button onClick={downloadSchema} disabled={!supabaseVerified} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: supabaseVerified ? C.text : C.dim, opacity: supabaseVerified ? 1 : 0.6, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: supabaseVerified ? 'pointer' : 'not-allowed' }}>
-                Download Schema
-              </button>
-              <button onClick={copySchemaImportCommand} disabled={!supabaseVerified} style={{ background: 'transparent', border: `1px solid ${C.border}`, color: supabaseVerified ? C.text : C.dim, opacity: supabaseVerified ? 1 : 0.6, padding: '8px 12px', borderRadius: 8, fontSize: 12, fontWeight: 700, cursor: supabaseVerified ? 'pointer' : 'not-allowed' }}>
-                Copy Import Command
-              </button>
-            </div>
-            <div style={{ fontSize: 11, color: C.dim, lineHeight: 1.5, wordBreak: 'break-word', overflowWrap: 'anywhere' }}>
-              Service key: <b style={{ color: C.text }}>{supabaseConfig?.serviceKeyMasked || 'not set'}</b><br />
-              DB URL: <b style={{ color: C.text }}>{supabaseConfig?.dbUrlMasked || 'not set'}</b><br />
-              Last verified: <b style={{ color: C.text }}>
-                {supabaseConfig?.lastVerifiedAt ? `${new Date(supabaseConfig.lastVerifiedAt).toLocaleString()}${supabaseConfig?.lastVerifiedDbHost ? ` (${supabaseConfig.lastVerifiedDbHost})` : ''}` : 'never'}
-              </b><br />
-              Restart backend after save, then run schema import on the target DB.
-            </div>
-            {supabaseMsg && <div style={{ fontSize: 11, color: supabaseMsg.toLowerCase().includes('failed') ? '#ef4444' : C.accent }}>{supabaseMsg}</div>}
-            {verifyMsg && <div style={{ fontSize: 11, color: verifyMsg.toLowerCase().includes('failed') ? '#ef4444' : C.accent }}>{verifyMsg}</div>}
-            {!supabaseVerified && <div style={{ fontSize: 11, color: C.dim }}>Verify connection first to enable schema actions.</div>}
-          </div>
-        </div>
-      </div>
-
-      <div style={{ background: C.card, border: `1px solid ${C.border}`, borderRadius: 20, padding: 'clamp(14px, 2.4vw, 24px)' }}>
-        <div style={{ fontSize: 12, color: C.dim, textTransform: 'uppercase', letterSpacing: '0.08em', marginBottom: 12 }}>Service Status</div>
-        <div className="admin-grid" style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16 }}>
-          {/* Teams Card */}
-          <div className="admin-card" style={{ background: `${C.bg}80`, border: `1px solid ${C.border}`, borderRadius: 14, padding: '16px', minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: '#4B53BC15', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {ICONS.teams(20, '#4B53BC')}
-            </div>
-            <div style={{ flex: 1 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Microsoft Teams</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: health?.teams?.enabled ? '#10b981' : '#ef4444' }}></div>
-                <span style={{ fontSize: 12, fontWeight: 600, color: health?.teams?.enabled ? '#10b981' : '#ef4444' }}>{health?.teams?.enabled ? 'Active' : 'Disabled'}</span>
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div className="admin-kv" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: C.muted }}>Active Subscriptions</span>
-              <span className="admin-kv-value" style={{ color: C.text, fontWeight: 600, wordBreak: 'break-word' }}>{health?.teams?.activeCount || 0}</span>
-            </div>
-            <div className="admin-kv" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: C.muted }}>Last Renewal</span>
-              <span className="admin-kv-value" style={{ color: C.text, fontWeight: 600, wordBreak: 'break-word' }}>{health?.teams?.lastRenewal ? new Date(health.teams.lastRenewal).toLocaleTimeString() : 'Never'}</span>
-            </div>
-            <div style={{ fontSize: 11, color: C.dim, background: `${C.bg}80`, padding: '8px 12px', borderRadius: 8, wordBreak: 'break-word', overflowWrap: 'anywhere', marginTop: 8 }}>
-              Webhook: {health?.teams?.notificationUrl}
-            </div>
-          </div>
-          </div>
-
-          {/* WhatsApp Card */}
-          <div className="admin-card" style={{ background: `${C.bg}80`, border: `1px solid ${C.border}`, borderRadius: 14, padding: '16px', minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: '#25D36615', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              {ICONS.whatsapp(20, '#25D366')}
-            </div>
-            <div style={{ flex: 1 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 700, color: C.text }}>WhatsApp Bot</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: health?.whatsapp?.isReady ? '#10b981' : '#f59e0b' }}></div>
-                <span style={{ fontSize: 12, fontWeight: 600, color: health?.whatsapp?.isReady ? '#10b981' : '#f59e0b' }}>{health?.whatsapp?.status || 'Offline'}</span>
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div className="admin-kv" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: C.muted }}>Monitored Groups</span>
-              <span className="admin-kv-value" style={{ color: C.text, fontWeight: 600, wordBreak: 'break-word' }}>{health?.whatsapp?.groups || 0}</span>
-            </div>
-            <div className="admin-kv" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: C.muted }}>Last Health Check</span>
-              <span className="admin-kv-value" style={{ color: C.text, fontWeight: 600, wordBreak: 'break-word' }}>{health?.whatsapp?.lastHealthCheck ? new Date(health.whatsapp.lastHealthCheck).toLocaleTimeString() : 'Never'}</span>
-            </div>
-          </div>
-          </div>
-
-          {/* Database & Config Card */}
-          <div className="admin-card" style={{ background: `${C.bg}80`, border: `1px solid ${C.border}`, borderRadius: 14, padding: '16px', minWidth: 0 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 20 }}>
-            <div style={{ width: 40, height: 40, borderRadius: 12, background: `${C.accent}15`, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-              <span style={{ fontSize: 20 }}>⚙️</span>
-            </div>
-            <div style={{ flex: 1 }}>
-              <h3 style={{ fontSize: 16, fontWeight: 700, color: C.text }}>Infrastructure</h3>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 2 }}>
-                <div style={{ width: 8, height: 8, borderRadius: '50%', background: health?.db === 'ok' ? '#10b981' : '#ef4444' }}></div>
-                <span style={{ fontSize: 12, fontWeight: 600, color: health?.db === 'ok' ? '#10b981' : '#ef4444' }}>Database {health?.db === 'ok' ? 'Connected' : 'Error'}</span>
-              </div>
-            </div>
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <div className="admin-kv" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: C.muted }}>Server Port</span>
-              <span className="admin-kv-value" style={{ color: C.text, fontWeight: 600, wordBreak: 'break-word' }}>{health?.config?.port}</span>
-            </div>
-            <div className="admin-kv" style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, gap: 8, flexWrap: 'wrap' }}>
-              <span style={{ color: C.muted }}>Monitored Teams Chats</span>
-              <span className="admin-kv-value" style={{ color: C.text, fontWeight: 600, wordBreak: 'break-word' }}>{health?.config?.monitoredChats}</span>
-            </div>
-            <div style={{ fontSize: 11, color: C.dim, background: `${C.bg}80`, padding: '8px 12px', borderRadius: 8, wordBreak: 'break-word', overflowWrap: 'anywhere', marginTop: 8 }}>
-              NGROK: {health?.config?.ngrok}
-            </div>
-          </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    <AdminSectionView
+      C={C}
+      ICONS={ICONS}
+      API={API}
+      authHeaders={authHeaders}
+      apiFetchJson={apiFetchJson}
+    />
   );
 }
-
 
 // ─── Main Dashboard ─────────────────────────────────────────────────────────────
 export default function Dashboard() {
-  const [activeNav, setActiveNav] = useState<NavSection>('governance');
-  const [theme, setTheme] = useState<'dark' | 'light'>('dark');
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
-  const [soundEnabled, setSoundEnabled] = useState(true);
-  const [draftCount, setDraftCount] = useState(0);
-  const [teamsCount, setTeamsCount] = useState(0);
-  const [slackCount, setSlackCount] = useState(0);
-  const [waCount, setWaCount] = useState(0);
-  const [summaryCount, setSummaryCount] = useState(0);
-  const prevCountsRef = useRef({ draftCount: 0, teamsCount: 0, slackCount: 0, waCount: 0, summaryCount: 0 });
-  const bootstrappedCountsRef = useRef(false);
+    const {
+      activeNav, setActiveNav,
+      theme, toggleTheme,
+      soundEnabled, toggleSound,
+      sidebarCollapsed, setSidebarCollapsed,
+      isMobile, setIsMobile,
+      draftCount, setDraftCount, teamsCount, setTeamsCount, slackCount, setSlackCount, waCount, setWaCount, summaryCount, setSummaryCount,
+    } = useAppStore()
 
-  const playNotificationTone = useCallback((type: 'task' | 'message' | 'summary') => {
+    const prevCountsRef = useRef({ draftCount: 0, teamsCount: 0, slackCount: 0, waCount: 0, summaryCount: 0 })
+    const bootstrappedCountsRef = useRef(false)
+  
+    const playNotificationTone = useCallback((type: 'task' | 'message' | 'summary') => {
     if (typeof window === 'undefined' || !soundEnabled) return;
     const AudioCtx = (window as any).AudioContext || (window as any).webkitAudioContext;
     if (!AudioCtx) return;
@@ -2712,22 +750,15 @@ export default function Dashboard() {
   }, [soundEnabled]);
 
   useEffect(() => {
-    const saved = localStorage.getItem('openclaw-theme') as 'dark' | 'light';
-    if (saved) setTheme(saved);
-    const savedSound = localStorage.getItem('openclaw-sound-enabled');
-    if (savedSound != null) setSoundEnabled(savedSound === 'true');
-  }, []);
-
-  useEffect(() => {
     const handleResize = () => setIsMobile(window.innerWidth <= 900);
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, []);
+  }, [setIsMobile]);
 
   useEffect(() => {
     if (isMobile) setSidebarCollapsed(true);
-  }, [isMobile]);
+  }, [isMobile, setSidebarCollapsed]);
 
   useEffect(() => {
     const palette = THEMES[theme];
@@ -2780,7 +811,7 @@ export default function Dashboard() {
     fetchCounts();
     const t = setInterval(fetchCounts, 30000);
     return () => clearInterval(t);
-  }, []);
+  }, [setDraftCount, setTeamsCount, setSlackCount, setWaCount, setSummaryCount]);
 
   const navItems: { key: NavSection; icon: React.ReactNode; label: string; sub: string; badge?: number }[] = [
     { key: 'governance', icon: ICONS.governance(18, activeNav === 'governance' ? C.accent : C.muted), label: 'Talos', sub: 'Draft review & approval', badge: draftCount },
@@ -2860,7 +891,7 @@ export default function Dashboard() {
             <span style={{ fontSize: 14, fontWeight: 700 }}>{sidebarCollapsed ? '»' : '«'}</span>
             {!sidebarCollapsed && <span style={{ fontSize: 12, fontWeight: 700 }}>Collapse</span>}
           </button>
-          <button onClick={() => setTheme(t => t === 'dark' ? 'light' : 'dark')}
+          <button onClick={toggleTheme}
             title={sidebarCollapsed ? 'Toggle theme' : undefined}
             style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: sidebarCollapsed ? 'center' : 'flex-start', gap: 12, padding: sidebarCollapsed ? '10px 8px' : '11px 14px', background: `${C.accent}10`, border: `1px solid ${C.accent}33`, borderRadius: 12, cursor: 'pointer', color: C.text, transition: 'all 0.2s', outline: 'none' }}
             onMouseEnter={e => e.currentTarget.style.background = `${C.accent}20`}
@@ -2869,7 +900,7 @@ export default function Dashboard() {
             {!sidebarCollapsed && <span style={{ fontSize: 13, fontWeight: 700 }}>{theme === 'dark' ? 'Green Light' : 'Deep Dark'}</span>}
           </button>
           <button
-            onClick={() => setSoundEnabled(v => !v)}
+            onClick={toggleSound}
             title={sidebarCollapsed ? 'Toggle notification sounds' : undefined}
             style={{ width: '100%', display: 'flex', alignItems: 'center', justifyContent: sidebarCollapsed ? 'center' : 'flex-start', gap: 12, padding: sidebarCollapsed ? '10px 8px' : '11px 14px', marginTop: 8, background: `${C.teams}10`, border: `1px solid ${C.teams}33`, borderRadius: 12, cursor: 'pointer', color: C.text, transition: 'all 0.2s', outline: 'none' }}
           >
@@ -2906,15 +937,59 @@ export default function Dashboard() {
             ☰
           </button>
         )}
-        {activeNav === 'governance' && <GovernanceSection />}
-        {activeNav === 'teams' && <TeamsSection />}
-        {activeNav === 'slack' && <SlackSection />}
-        {activeNav === 'whatsapp' && <WhatsAppSection />}
-        {activeNav === 'summaries' && <SummariesSection />}
-        {activeNav === 'forward-log' && <ForwardLogSection />}
-        {activeNav === 'tasks' && <TaskSection />}
-        {activeNav === 'link-reads' && <LinkReadsSection />}
-        {activeNav === 'admin' && <AdminSection />}
+        {activeNav === 'governance' && (
+          <ErrorBoundary sectionName="Governance">
+            <GovernanceSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'teams' && (
+          <ErrorBoundary sectionName="Teams Messages">
+            <TeamsSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'slack' && (
+          <ErrorBoundary sectionName="Slack Messages">
+            <SlackSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'whatsapp' && (
+          <ErrorBoundary sectionName="WhatsApp Messages">
+            <WhatsAppSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'summaries' && (
+          <ErrorBoundary sectionName="Chat Summaries">
+            <SummariesSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'tasks' && (
+          <ErrorBoundary sectionName="Task Planner">
+            <TaskSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'link-reads' && (
+          <ErrorBoundary sectionName="Link Reads">
+            <LinkReadsSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'forward-log' && (
+          <ErrorBoundary sectionName="Forward Log">
+            <ForwardLogSection />
+          </ErrorBoundary>
+        )}
+
+        {activeNav === 'admin' && (
+          <ErrorBoundary sectionName="System Admin">
+            <AdminSection />
+          </ErrorBoundary>
+        )}
       </div>
     </div>
   );

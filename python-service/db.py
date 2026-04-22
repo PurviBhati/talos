@@ -1,6 +1,7 @@
 import os
 import requests
 import psycopg
+import time
 from psycopg.rows import dict_row
 from typing import Optional
 
@@ -31,7 +32,30 @@ def get_connection():
     if ("supabase.com" in dsn or "pooler.supabase.com" in dsn) and "sslmode=" not in dsn:
         dsn = f"{dsn}{'&' if '?' in dsn else '?'}sslmode=require"
 
-    return psycopg.connect(dsn, row_factory=dict_row)
+    connect_timeout = _clamp_int_env("PY_DB_CONNECT_TIMEOUT_SEC", 45, 5, 120)
+    retries = _clamp_int_env("PY_DB_CONNECT_RETRIES", 4, 0, 10)
+    base_delay_ms = _clamp_int_env("PY_DB_RETRY_BASE_DELAY_MS", 700, 100, 5000)
+
+    last_error = None
+    for attempt in range(retries + 1):
+        try:
+            return psycopg.connect(
+                dsn,
+                row_factory=dict_row,
+                connect_timeout=connect_timeout,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+        except Exception as exc:
+            last_error = exc
+            if attempt >= retries:
+                break
+            delay = min((base_delay_ms * (2 ** attempt)) / 1000.0, 8.0)
+            time.sleep(delay)
+
+    raise last_error
 
 
 def _safe_get_json(url: str):
@@ -40,8 +64,14 @@ def _safe_get_json(url: str):
         if not r.ok:
             print(f"⚠️ API returned {r.status_code} for {url}")
             return []
-        data = r.json()
-        return data if isinstance(data, list) else []
+        payload = r.json()
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            data = payload.get("data")
+            if isinstance(data, list):
+                return data
+        return []
     except Exception as e:
         print(f"❌ API fetch failed {url}: {e}")
         return []
