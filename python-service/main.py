@@ -1,5 +1,7 @@
 import asyncio
 import os
+import sys
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, HTTPException
@@ -19,6 +21,23 @@ from scheduler import start_scheduler
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env", override=False)
 load_dotenv(BASE_DIR.parent / "backend" / ".env", override=True)
+
+# Ensure Unicode log output works on Windows consoles (cp1252 can crash on emoji).
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
+# On Windows, Proactor transport can emit noisy WinError 10054 callbacks
+# when clients disconnect abruptly. Selector loop is more stable for uvicorn.
+if os.name == "nt":
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+
+SUMMARIES_CACHE_TTL_SEC = int(os.getenv("PY_SUMMARIES_CACHE_TTL_SEC", "90"))
+_summaries_cache = {
+    "at": 0.0,
+    "payload": {"success": True, "count": 0, "summaries": []},
+}
 
 
 def get_cors_origins():
@@ -250,8 +269,9 @@ async def dismiss_summary(source: str, channel_id: str):
 @app.get("/summaries")
 async def list_all_summaries():
     from db import get_connection
-    conn = get_connection()
+    conn = None
     try:
+        conn = get_connection()
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT channel_id, source, channel_name, summary_text,
@@ -269,6 +289,27 @@ async def list_all_summaries():
                 if r.get("last_updated"):
                     r["last_updated"] = str(r["last_updated"])
                 results.append(r)
-        return {"success": True, "count": len(results), "summaries": results}
+        payload = {"success": True, "count": len(results), "summaries": results}
+        _summaries_cache["at"] = time.time()
+        _summaries_cache["payload"] = payload
+        return payload
+    except Exception as e:
+        now = time.time()
+        has_fresh_cache = (now - _summaries_cache["at"]) <= SUMMARIES_CACHE_TTL_SEC
+        if has_fresh_cache:
+            cached = dict(_summaries_cache["payload"])
+            cached["degraded"] = True
+            cached["cache_age_sec"] = int(now - _summaries_cache["at"])
+            cached["note"] = "Served from cache due to temporary database issue"
+            return cached
+        print(f"[warn] /summaries fallback to empty result due to DB issue: {e}")
+        return {
+            "success": True,
+            "count": 0,
+            "summaries": [],
+            "degraded": True,
+            "note": "Temporary database issue; returning empty list",
+        }
     finally:
-        conn.close()
+        if conn:
+            conn.close()

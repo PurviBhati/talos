@@ -12,6 +12,51 @@ const __dirname = path.dirname(__filename);
 
 const { Client, LocalAuth, MessageMedia } = pkg;
 const DEFAULT_TENANT_ID = process.env.DEFAULT_TENANT_ID || "tenant-default";
+const INSTANCE_LOCK_NAME = "whatsapp-bot-instance.lock";
+
+function readPidFile(filePath) {
+  try {
+    const raw = fs.readFileSync(filePath, "utf8").trim();
+    const pid = parseInt(raw, 10);
+    return Number.isFinite(pid) ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function formatWhatsAppStartupFailure(error) {
+  const msg = error?.message || String(error);
+  const chromeProfileDir = path.join(__dirname, "..", ".wwebjs_auth", "session");
+  if (msg.includes("browser is already running") || msg.includes("userDataDir")) {
+    return [
+      "",
+      "════════════════════════════════════════════════════════════════",
+      " WhatsApp — Chromium profile already in use",
+      "────────────────────────────────────────────────────────────────",
+      " Another Chromium/Puppeteer process is using:",
+      `   ${chromeProfileDir}`,
+      "",
+      " This backend already clears stale locks on start. If you still see this:",
+      "   • Stop any other `node server.js` using this folder, or set WHATSAPP_BOT_ENABLED=false there.",
+      "   • Close orphan Chrome only for this profile (we target-kill Chromium using that path).",
+      "   • Or set WHATSAPP_PRESTART_KILL_CHROMIUM=false only if you manage Chromium yourself.",
+      "",
+      ` Technical: ${msg}`,
+      "════════════════════════════════════════════════════════════════",
+      "",
+    ].join("\n");
+  }
+  return `❌ Failed to start WhatsApp Bot: ${msg}`;
+}
 
 function getJinaHeaders() {
   const key = String(process.env.JINA_API_KEY || '').trim();
@@ -146,7 +191,9 @@ class WhatsAppBot {
     this.reconnectDelay = 5000;
     this.healthCheckInterval = null;
     this.lastHealthCheck = null;
-    this.sessionPath = './.wwebjs_auth';
+    this.sessionPath = path.join(__dirname, "..", ".wwebjs_auth");
+    this.chromeProfilePath = path.join(this.sessionPath, "session");
+    this.instanceLockPath = path.join(this.sessionPath, INSTANCE_LOCK_NAME);
     this.qrCode = null;
     this.qrDataUrl = null;
     this.status = 'initializing';
@@ -160,6 +207,112 @@ class WhatsAppBot {
   isNonRecoverableStartupError(error) {
     const message = error?.message || '';
     return error?.code === 'EPERM' || message.includes('spawn EPERM');
+  }
+
+  acquireInstanceLock() {
+    try {
+      fs.mkdirSync(this.sessionPath, { recursive: true });
+    } catch (err) {
+      console.error("❌ WhatsApp Bot: cannot create session directory:", err.message);
+      return false;
+    }
+
+    const tryOnce = () => {
+      try {
+        const fd = fs.openSync(this.instanceLockPath, "wx");
+        try {
+          fs.writeSync(fd, String(process.pid), "utf8");
+        } finally {
+          fs.closeSync(fd);
+        }
+        return true;
+      } catch (err) {
+        if (err?.code !== "EEXIST") throw err;
+        const otherPid = readPidFile(this.instanceLockPath);
+        if (otherPid == null) {
+          try {
+            fs.rmSync(this.instanceLockPath, { force: true });
+          } catch {}
+          return tryOnce();
+        }
+        if (otherPid === process.pid) return true;
+        if (isProcessAlive(otherPid)) return false;
+        try {
+          fs.rmSync(this.instanceLockPath, { force: true });
+        } catch {}
+        return tryOnce();
+      }
+    };
+
+    try {
+      return tryOnce();
+    } catch (err) {
+      console.error("❌ WhatsApp Bot: instance lock failed:", err.message);
+      return false;
+    }
+  }
+
+  releaseInstanceLock() {
+    try {
+      const pid = readPidFile(this.instanceLockPath);
+      if (pid === process.pid || pid == null) {
+        fs.rmSync(this.instanceLockPath, { force: true });
+      }
+    } catch {}
+  }
+
+  removeChromeProfileLockArtifacts() {
+    const profileDir = this.chromeProfilePath;
+    const lockFiles = [
+      path.join(profileDir, "lockfile"),
+      path.join(profileDir, "SingletonLock"),
+      path.join(profileDir, "SingletonCookie"),
+      path.join(profileDir, "SingletonSocket"),
+      path.join(profileDir, "DevToolsActivePort"),
+    ];
+    for (const file of lockFiles) {
+      try {
+        if (fs.existsSync(file)) fs.rmSync(file, { force: true });
+      } catch {}
+    }
+  }
+
+  async killChromiumForThisProfile() {
+    const { execFile } = await import("child_process");
+    const { promisify } = await import("util");
+    const execFileAsync = promisify(execFile);
+    const profileAbs = path.resolve(this.chromeProfilePath);
+    try {
+      if (process.platform === "win32") {
+        const esc = profileAbs.replace(/'/g, "''");
+        const ps = [
+          "Get-CimInstance Win32_Process | Where-Object {",
+          "$_.CommandLine -and $_.CommandLine.Contains('" + esc + "') -and",
+          "($_.Name -match '^(chrome|chromium|msedge)\\.exe$')",
+          "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+        ].join(" ");
+        await execFileAsync(
+          "powershell.exe",
+          ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", ps],
+          { timeout: 45000, windowsHide: true }
+        );
+      } else {
+        const pattern = profileAbs.replace(/'/g, "'\\''");
+        await execFileAsync("sh", ["-c", `pkill -f '${pattern}' || true`], { timeout: 45000 });
+      }
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  async preSessionCleanup() {
+    this.removeChromeProfileLockArtifacts();
+    const skipKill = String(process.env.WHATSAPP_PRESTART_KILL_CHROMIUM || "true").toLowerCase() === "false";
+    if (!skipKill) {
+      await this.killChromiumForThisProfile();
+      await new Promise((r) => setTimeout(r, 500));
+      this.removeChromeProfileLockArtifacts();
+    }
   }
 
   initializeClient() {
@@ -449,12 +602,21 @@ class WhatsAppBot {
       return;
     }
     try {
+      if (!this.acquireInstanceLock()) {
+        this.status = 'duplicate_instance';
+        console.error(
+          `❌ WhatsApp Bot skipped: another backend process already owns this session (see ${this.instanceLockPath}). ` +
+            "Stop the other Node server using this profile, or set WHATSAPP_BOT_ENABLED=false on this instance."
+        );
+        return;
+      }
+      await this.preSessionCleanup();
       console.log('🚀 Starting WhatsApp Bot...');
       const sessionExists = fs.existsSync(this.sessionPath);
       console.log(`📁 Session exists: ${sessionExists}`);
       await this.client.initialize();
     } catch (error) {
-      console.error('❌ Failed to start WhatsApp Bot:', error);
+      console.error(formatWhatsAppStartupFailure(error));
       await this.handleStartupError(error);
     }
   }
@@ -490,33 +652,10 @@ class WhatsAppBot {
   async forceCleanup() {
     try {
       if (this.client) await this.client.destroy();
-      // Remove stale Chromium lock artifacts in the LocalAuth profile.
-      // These files are commonly left behind after abrupt process exits and
-      // trigger "browser is already running" on next boot.
-      const lockFiles = [
-        path.join(this.sessionPath, 'lockfile'),
-        path.join(this.sessionPath, 'SingletonLock'),
-        path.join(this.sessionPath, 'SingletonCookie'),
-        path.join(this.sessionPath, 'SingletonSocket'),
-        path.join(this.sessionPath, 'DevToolsActivePort'),
-      ];
-      for (const file of lockFiles) {
-        try {
-          if (fs.existsSync(file)) fs.rmSync(file, { force: true });
-        } catch {}
-      }
-
-      // Keep this as a fallback for headless chromium zombies.
-      const { exec } = await import('child_process');
-      const { promisify } = await import('util');
-      const execAsync = promisify(exec);
-      try {
-        if (process.platform === 'win32') {
-          await execAsync('taskkill /f /im chrome.exe');
-        } else {
-          await execAsync('pkill -f "chrome.*whatsapp"');
-        }
-      } catch {}
+      this.removeChromeProfileLockArtifacts();
+      await this.killChromiumForThisProfile();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      this.removeChromeProfileLockArtifacts();
       console.log('🧹 Force cleanup completed');
     } catch (error) {
       console.error('❌ Force cleanup error:', error);
@@ -710,6 +849,7 @@ class WhatsAppBot {
     return {
       status: this.status,
       connected: this.isReady,
+      duplicateInstance: this.status === "duplicate_instance",
       groupsLoaded: this.groups.size,
       reconnectAttempts: this.reconnectAttempts,
       lastHealthCheck: this.lastHealthCheck,
@@ -730,6 +870,7 @@ class WhatsAppBot {
     } catch (error) {
       console.error('❌ Error destroying WhatsApp bot:', error.message);
     }
+    this.releaseInstanceLock();
   }
 }
 
